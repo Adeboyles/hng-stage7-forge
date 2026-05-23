@@ -1,4 +1,30 @@
 
+"""
+engine/logs.py
+--------------
+Disk-backed log writer + SSE tail endpoint.
+
+Design:
+  - Every log line is written to disk immediately as one JSON object per
+    line (NDJSON). No buffering in Python, no buffering in the OS file
+    object (we flush + fsync where it matters).
+  - Readers open the file independently and seek with a byte cursor. A
+    client connecting mid-build reads from offset 0, drains everything
+    on disk (the "backlog"), then tails for new bytes via inotify when
+    available, falling back to a short poll.
+  - The reader yields one SSE `data:` frame per JSON line.
+  - Nothing in this module holds the full log in memory. Both writer and
+    reader work line-by-line. A 50 MB log is just 50 MB of disk I/O.
+
+Format (one line, newline-terminated):
+  {"ts":"2026-05-22T10:00:00.123Z","job":"build","line":"Running tests..."}
+
+End-of-stream sentinel:
+  When the run finishes, the writer appends a final line with
+  "eof": true. SSE readers in follow mode close the connection after
+  emitting it.
+"""
+
 from __future__ import annotations
 
 import asyncio
