@@ -40,6 +40,8 @@ The parser currently defines these dataclasses:
 
 These represent only validated pipeline state.
 
+`JobDefinition` also exposes `to_shell_script()`, which renders the ordered job steps into one shell script for the current runner.
+
 ### Validation Behavior
 
 The parser is strict by design.
@@ -138,6 +140,16 @@ The parser validates in this order:
 
 This split is why some errors are source-aware from the original YAML node while cross-job dependency errors currently use a generic position.
 
+### Runner Alignment
+
+The current runner executes one shell script per job. The parser now supports that shape directly:
+
+```python
+script = pipeline.jobs["build"].to_shell_script()
+```
+
+The rendered script starts with `set -e`, then emits each step in declared order with a small marker line before the step command.
+
 ## Scheduler
 
 ### Responsibilities
@@ -212,10 +224,24 @@ That means `lint` and `test` can run together, and `package` becomes runnable on
 - It initializes all jobs as `queued`.
 - It processes each topological batch in chunks of `concurrency_limit`.
 - It calls `executor(job_name, job_definition)` for runnable jobs.
-- It accepts terminal results of `succeeded`, `failed`, or `skipped`.
+- It accepts terminal status strings or runner-style result objects.
 - If a job fails, downstream queued dependents are marked `skipped`.
 
 This is still synchronous coordination. It is designed so the future runner can provide the actual execution mechanism.
+
+### Executor Result Coercion
+
+The scheduler accepts two executor result styles:
+
+- plain terminal status strings: `succeeded`, `failed`, `skipped`
+- runner-like objects with `exit_code` and optional `timed_out` / `oom_killed`
+
+Runner-like objects are normalized as follows:
+
+- `exit_code == 0` and not timed out and not OOM killed -> `succeeded`
+- anything else -> `failed`
+
+`SchedulerRunResult` returns both the final `job_statuses` map and the original `executor_results` for jobs that actually ran.
 
 ## Example Usage
 
@@ -229,7 +255,9 @@ batches = topological_batches(pipeline)
 scheduler = DAGScheduler(pipeline, concurrency_limit=2)
 
 def executor(job_name, job_definition):
+    script = job_definition.to_shell_script()
     print(f"running {job_name} in {job_definition.runtime}")
+    print(script)
     return "succeeded"
 
 result = scheduler.run(executor)
@@ -245,7 +273,7 @@ The implementation is intentionally narrow for the first engine slice.
 - Missing-field errors raised by `_require_field(...)` currently use a generic `line 1, column 1` fallback instead of the parent node's exact location.
 - Scalar validation is permissive in one specific way: `_require_scalar_string(...)` accepts YAML scalar tags for strings, ints, floats, and bools, then returns their string value.
 - The scheduler coordinates synchronously; it does not launch real concurrent workers yet.
-- Status handling is intentionally minimal and only covers the current scheduler tests.
+- The scheduler can understand runner-style results, but it still does not build `JobSpec` objects or launch the runner itself.
 
 ## Tests
 

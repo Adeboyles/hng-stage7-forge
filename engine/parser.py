@@ -21,17 +21,29 @@ class ResourceLimits:
 
 @dataclass(frozen=True)
 class StepDefinition:
+    """One shell step inside a pipeline job."""
+
     name: str
     run: str
 
 
 @dataclass(frozen=True)
 class JobDefinition:
+    """Validated pipeline job definition."""
+
     name: str
     runtime: str
     resources: ResourceLimits
     steps: tuple[StepDefinition, ...]
     needs: tuple[str, ...] = ()
+
+    def to_shell_script(self) -> str:
+        """Render all job steps into one shell script for the container runner."""
+        lines = ["set -e"]
+        for step in self.steps:
+            lines.append(f'echo "==> {step.name}"')
+            lines.append(step.run)
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -52,12 +64,15 @@ class PipelineDefinition:
 
 @dataclass(frozen=True)
 class PipelineValidationError(ValueError):
+    """Schema or structural validation failure for pipeline YAML."""
+
     message: str
     line: int
     column: int
     path: str
 
     def __str__(self) -> str:
+        """Return a stable human-readable validation error string."""
         location = f"line {self.line}, column {self.column}"
         if self.path:
             return f"{self.message} at {self.path} ({location})"
@@ -65,10 +80,12 @@ class PipelineValidationError(ValueError):
 
 
 def parse_pipeline_file(path: str | Path) -> PipelineDefinition:
+    """Read a pipeline file from disk and parse it into validated models."""
     return parse_pipeline_text(Path(path).read_text(encoding="utf-8"))
 
 
 def parse_pipeline_text(text: str) -> PipelineDefinition:
+    """Parse pipeline YAML text into a validated ``PipelineDefinition``."""
     try:
         root = yaml.compose(text)
     except yaml.YAMLError as exc:
@@ -101,6 +118,7 @@ def parse_pipeline_text(text: str) -> PipelineDefinition:
 
 
 def _parse_dependencies(node: Node | None, path: str) -> tuple[DependencySpec, ...]:
+    """Parse the optional top-level dependency declarations."""
     if node is None:
         return ()
 
@@ -119,6 +137,7 @@ def _parse_dependencies(node: Node | None, path: str) -> tuple[DependencySpec, .
 def _parse_jobs(
     root_fields: dict[str, Node], field_name: str
 ) -> dict[str, JobDefinition]:
+    """Parse the pipeline jobs mapping into validated job definitions."""
     jobs_node = _require_field(root_fields, field_name, "$")
     jobs_mapping = _require_mapping(jobs_node, field_name)
 
@@ -152,6 +171,7 @@ def _parse_jobs(
 
 
 def _parse_resources(node: Node, path: str) -> ResourceLimits:
+    """Parse CPU and memory resource limits for one job."""
     fields = _mapping_to_node_map(_require_mapping(node, path), path)
     cpu_node = _require_field(fields, "cpu", path)
     memory = _require_string_field(fields, "memory", path)
@@ -161,6 +181,7 @@ def _parse_resources(node: Node, path: str) -> ResourceLimits:
 
 
 def _parse_needs(node: Node | None, path: str) -> tuple[str, ...]:
+    """Parse and de-duplicate optional job dependency names."""
     if node is None:
         return ()
 
@@ -179,6 +200,7 @@ def _parse_needs(node: Node | None, path: str) -> tuple[str, ...]:
 
 
 def _parse_steps(node: Node, path: str) -> tuple[StepDefinition, ...]:
+    """Parse the ordered list of job steps."""
     steps: list[StepDefinition] = []
     for index, item_node in enumerate(_require_sequence(node, path).value):
         item_path = f"{path}[{index}]"
@@ -192,6 +214,7 @@ def _parse_steps(node: Node, path: str) -> tuple[StepDefinition, ...]:
 def _parse_artifacts(
     root_fields: dict[str, Node], field_name: str
 ) -> tuple[ArtifactDefinition, ...]:
+    """Parse published artifact declarations and enforce unique coordinates."""
     artifacts_node = _require_field(root_fields, field_name, "$")
     artifacts: list[ArtifactDefinition] = []
     seen: set[tuple[str, str]] = set()
@@ -221,6 +244,7 @@ def _parse_artifacts(
 
 
 def _validate_job_dependencies(jobs: dict[str, JobDefinition]) -> None:
+    """Ensure every ``needs`` reference points at a known, non-self job."""
     known_jobs = set(jobs)
     for job_name, job in jobs.items():
         for dependency in job.needs:
@@ -241,6 +265,7 @@ def _validate_job_dependencies(jobs: dict[str, JobDefinition]) -> None:
 
 
 def _mapping_to_node_map(node: MappingNode, path: str) -> dict[str, Node]:
+    """Convert a YAML mapping node into a validated key-to-node mapping."""
     result: dict[str, Node] = {}
     allowed = _allowed_fields_for_path(path)
 
@@ -265,6 +290,7 @@ def _mapping_to_node_map(node: MappingNode, path: str) -> dict[str, Node]:
 
 
 def _allowed_fields_for_path(path: str) -> set[str] | None:
+    """Return the allowed field names for a schema path."""
     if path == "$":
         return {"name", "version", "dependencies", "jobs", "artifacts"}
     if path.startswith("dependencies["):
@@ -288,6 +314,7 @@ def _allowed_fields_for_path(path: str) -> set[str] | None:
 
 
 def _required_fields_for_path(path: str) -> set[str]:
+    """Return the required field names for a schema path."""
     if path == "$":
         return {"name", "version", "jobs", "artifacts"}
     if path.startswith("dependencies["):
@@ -309,6 +336,7 @@ def _required_fields_for_path(path: str) -> set[str]:
 
 
 def _require_field(fields: dict[str, Node], field_name: str, path: str) -> Node:
+    """Fetch one field from a validated mapping or raise a schema error."""
     if field_name not in fields:
         suffix = f"{path}.{field_name}" if path != "$" else field_name
         raise _error_from_position(
@@ -318,24 +346,28 @@ def _require_field(fields: dict[str, Node], field_name: str, path: str) -> Node:
 
 
 def _require_string_field(fields: dict[str, Node], field_name: str, path: str) -> str:
+    """Fetch one scalar field and return its YAML string value."""
     field_node = _require_field(fields, field_name, path)
     suffix = f"{path}.{field_name}" if path != "$" else field_name
     return _require_scalar_string(field_node, suffix)
 
 
 def _require_mapping(node: Node, path: str) -> MappingNode:
+    """Require that a YAML node is a mapping node."""
     if not isinstance(node, MappingNode):
         raise _error(node, path, "expected mapping")
     return node
 
 
 def _require_sequence(node: Node, path: str) -> SequenceNode:
+    """Require that a YAML node is a sequence node."""
     if not isinstance(node, SequenceNode):
         raise _error(node, path, "expected sequence")
     return node
 
 
 def _require_scalar_string(node: Node, path: str) -> str:
+    """Require that a YAML node is an accepted scalar and return its text."""
     if not isinstance(node, ScalarNode):
         raise _error(node, path, "expected scalar string")
     if node.tag not in (
@@ -349,6 +381,7 @@ def _require_scalar_string(node: Node, path: str) -> str:
 
 
 def _parse_float(node: Node, path: str) -> float:
+    """Parse one YAML scalar into a float CPU value."""
     if not isinstance(node, ScalarNode):
         raise _error(node, path, "expected numeric cpu value")
     try:
@@ -358,6 +391,7 @@ def _parse_float(node: Node, path: str) -> float:
 
 
 def _error(node: Node, path: str, message: str) -> PipelineValidationError:
+    """Build a validation error from a YAML node's source position."""
     return PipelineValidationError(
         message=message,
         line=node.start_mark.line + 1,
@@ -369,4 +403,5 @@ def _error(node: Node, path: str, message: str) -> PipelineValidationError:
 def _error_from_position(
     line: int, column: int, path: str, message: str
 ) -> PipelineValidationError:
+    """Build a validation error from an explicit source position."""
     return PipelineValidationError(message=message, line=line, column=column, path=path)

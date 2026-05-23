@@ -1,4 +1,5 @@
 from textwrap import dedent
+from types import SimpleNamespace
 
 from engine.parser import parse_pipeline_text
 from engine.scheduler import DAGScheduler, find_cycle, topological_batches
@@ -96,3 +97,43 @@ def test_scheduler_marks_dependents_skipped_after_failure():
 
     assert result.job_statuses["lint"] == "failed"
     assert result.job_statuses["package"] == "skipped"
+
+
+def test_scheduler_accepts_runner_style_job_results():
+    pipeline = parse_pipeline_text(
+        dedent(
+            """
+            name: demo
+            version: 1.0.0
+            jobs:
+              build:
+                runtime: alpine:3.18
+                resources: { cpu: 1.0, memory: 128Mi }
+                steps:
+                  - name: test
+                    run: echo test
+                  - name: package
+                    run: echo package
+            artifacts:
+              - name: demo
+                version: 1.0.0
+                path: ./out.tar.gz
+            """
+        )
+    )
+
+    scheduler = DAGScheduler(pipeline, concurrency_limit=1)
+
+    def executor(job_name, job_definition):
+        return SimpleNamespace(
+            job_name=job_name,
+            script=job_definition.to_shell_script(),
+            exit_code=0,
+            oom_killed=False,
+            timed_out=False,
+        )
+
+    result = scheduler.run(executor)
+
+    assert result.job_statuses["build"] == "succeeded"
+    assert result.executor_results["build"].exit_code == 0
