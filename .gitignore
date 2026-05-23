@@ -1,4 +1,5 @@
-
+.codex
+__pycache__
 # Forge-specific
 data/workspaces/*
 !data/workspaces/.gitkeep
