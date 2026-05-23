@@ -28,7 +28,7 @@ services:
       dockerfile: Dockerfile
     container_name: forge-registry
     ports:
-      - "8001:8001"
+      - 8001
     volumes:
       - ./data/artifacts:/data/artifacts
       - ./data:/data
@@ -36,7 +36,6 @@ services:
     environment:
       - FORGE_CONFIG=/app/config.yaml
     networks:
-      - forge-net
       - forge-internal
     restart: unless-stopped
 
