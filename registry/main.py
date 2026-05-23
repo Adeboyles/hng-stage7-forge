@@ -10,10 +10,10 @@ from fastapi import (
 )
 from fastapi.responses import Response, JSONResponse
 
-from registry.storage import ArtifactStorage
-from registry.metadata import MetadataStore
-from registry.resolver import DependencyResolver
-from registry.auth import AuthManager
+from storage import ArtifactStorage
+from metadata import MetadataStore
+from resolver import DependencyResolver
+from auth import AuthManager
 
 app = FastAPI(title="Forge Artifact Registry")
 
