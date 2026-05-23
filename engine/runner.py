@@ -40,9 +40,9 @@ log = logging.getLogger(__name__)
 # Constants. Centralised so the security review has one place to read.
 # ---------------------------------------------------------------------------
 
-FORGE_NETWORK = "forge-internal"
-REGISTRY_HOST = "registry"
-REGISTRY_PORT = 8001
+#FORGE_NETWORK = "forge-internal"
+#REGISTRY_HOST = "registry"
+#REGISTRY_PORT = 8001
 
 # Resource limits.
 CPU_PERIOD = 100_000
