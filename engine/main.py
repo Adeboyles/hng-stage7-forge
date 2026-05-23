@@ -10,11 +10,11 @@ import aiosqlite
 from fastapi import FastAPI, UploadFile, File, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
-from engine.parser import parse_pipeline, PipelineValidationError
-from engine.scheduler import DAGScheduler
-from engine.runner import JobRunner, Job, JobStep, JobResources, JobArtifact
-from engine.logs import stream_logs, write_log_line
-from engine import slack
+from parser import parse_pipeline, PipelineValidationError
+from scheduler import DAGScheduler
+from runner import JobRunner, Job, JobStep, JobResources, JobArtifact
+from logs import stream_logs, write_log_line
+import slack
 
 app = FastAPI(title="Forge CI Engine")
 
