@@ -1,2 +1,13 @@
 .codex
 __pycache__
+# Forge-specific
+data/workspaces/*
+!data/workspaces/.gitkeep
+data/logs/*
+!data/logs/.gitkeep
+data/artifacts/*
+!data/artifacts/.gitkeep
+data/registry.db
+data/*.db
+.env
+~/.forge/
