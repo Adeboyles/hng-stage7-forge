@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from engine.parser import JobDefinition, PipelineDefinition
+from parser import JobDefinition, PipelineDefinition
 
 
 TERMINAL_STATUSES = {"succeeded", "failed", "skipped"}

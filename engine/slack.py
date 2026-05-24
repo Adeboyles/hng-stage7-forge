@@ -1,8 +1,6 @@
 import httpx
 import yaml
 from pathlib import Path
-from config import SLACK_WEBHOOK_URL
-import requests
 
 
 def load_webhook_url() -> str:

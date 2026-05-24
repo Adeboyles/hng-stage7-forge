@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from registry.metadata import ArtifactMetadataStore, ArtifactNotFoundError
+from metadata import ArtifactMetadataStore, ArtifactNotFoundError
 
 
 VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")

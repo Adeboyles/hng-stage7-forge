@@ -31,7 +31,7 @@ import docker
 from docker.errors import APIError, ContainerError, ImageNotFound, NotFound
 from docker.models.containers import Container
 
-from .logs import LogWriter
+from logs import LogWriter
 
 log = logging.getLogger(__name__)
 

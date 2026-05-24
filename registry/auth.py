@@ -3,7 +3,7 @@ import sqlite3
 import secrets
 import datetime
 from functools import wraps
-from flask import request, jsonify, g
+from fastapi import Request, HTTPException
 import bcrypt
 import yaml
 
@@ -19,6 +19,7 @@ def get_db():
     """Get a SQLite connection, creating the tokens table if needed."""
     config = load_config()
     db_path = config["registry"]["db_path"]
+    os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("""
@@ -78,30 +79,29 @@ def verify_token(raw_token):
     return None
 
 
-def require_auth(f):
+async def get_token_identity(request: Request) -> str:
     """
-    Flask decorator that enforces Bearer token auth.
-    Use on any route that requires authentication.
-
-    After validation, the token identity is available as g.token_identity.
+    FastAPI dependency that enforces Bearer token auth.
+    Use in route functions like:
+        @app.post("/artifacts/{name}/{version}")
+        async def upload(name: str, version: str, identity: str = Depends(get_token_identity)):
     """
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        auth_header = request.headers.get("Authorization", "")
+    auth_header = request.headers.get("Authorization", "")
 
-        if not auth_header.startswith("Bearer "):
-            return jsonify({"error": "Missing or invalid Authorization header"}), 401
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
 
-        raw_token = auth_header[7:]
+    raw_token = auth_header[7:]
 
-        identity = verify_token(raw_token)
-        if identity is None:
-            return jsonify({"error": "Invalid token"}), 401
+    identity = verify_token(raw_token)
+    if identity is None:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
-        g.token_identity = identity
-        return f(*args, **kwargs)
+    return identity
 
-    return decorated
+
+# Keep require_auth as a simple wrapper for compatibility
+require_auth = get_token_identity
 
 
 def list_tokens():

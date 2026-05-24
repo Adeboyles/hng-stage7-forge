@@ -11,9 +11,9 @@ from fastapi import (
 from fastapi.responses import Response, JSONResponse
 
 from storage import ArtifactStorage
-from metadata import MetadataStore
+from metadata import ArtifactMetadataStore as MetadataStore
 from resolver import DependencyResolver
-from auth import AuthManager
+from auth import create_token, verify_token, require_auth, get_db
 
 app = FastAPI(title="Forge Artifact Registry")
 
@@ -21,7 +21,7 @@ DB_PATH = Path("/tmp/artifacts/registry.db")
 STORAGE_PATH = Path("/tmp/artifacts/blobs")
 
 storage = ArtifactStorage(STORAGE_PATH)
-auth_manager = AuthManager(DB_PATH)
+# Auth uses standalone functions from auth.py
 
 
 async def get_metadata():
@@ -31,8 +31,8 @@ async def get_metadata():
 @app.on_event("startup")
 async def startup():
     STORAGE_PATH.mkdir(parents=True, exist_ok=True)
-    await MetadataStore(DB_PATH).init()
-    await auth_manager.init()
+    MetadataStore(DB_PATH).init_schema()
+    get_db()  # ensure tokens table exists
 
 
 # ── Auth ───────────────────────────────────────────────────────────
@@ -43,19 +43,19 @@ async def require_auth(
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Bearer token")
     token = authorization.replace("Bearer ", "").strip()
-    identity = await auth_manager.verify_token(token)
+    identity = verify_token(token)
     if not identity:
         raise HTTPException(status_code=401, detail="Invalid token")
     return identity
 
 
 @app.get("/auth/verify")
-async def verify_token(authorization: Optional[str] = Header(None)):
+async def verify_token_endpoint(authorization: Optional[str] = Header(None)):
     """Used by engine to verify tokens."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Invalid token")
     token = authorization.replace("Bearer ", "").strip()
-    identity = await auth_manager.verify_token(token)
+    identity = verify_token(token)
     if not identity:
         raise HTTPException(status_code=401, detail="Invalid token")
     return {"identity": identity}

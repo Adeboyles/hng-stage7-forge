@@ -277,7 +277,7 @@ def _is_eof_line(line: bytes) -> bool:
 #
 #   from fastapi import APIRouter
 #   from fastapi.responses import StreamingResponse
-#   from engine.logs import tail_log
+#   from logs import tail_log
 #
 #   router = APIRouter()
 #
