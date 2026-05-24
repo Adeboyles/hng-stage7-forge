@@ -5,9 +5,8 @@ setup(
     version="0.1.0",
     packages=find_packages(),
     install_requires=[
-        "requests>=2.32.0",
-        "pyyaml>=6.0",
-        "click>=8.1.0",
+        "httpx>=0.27.0",
+        "PyYAML>=6.0",
     ],
     entry_points={
         "console_scripts": [
