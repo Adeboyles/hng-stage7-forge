@@ -1,3 +1,22 @@
+"""
+engine/runner.py
+----------------
+Executes build jobs inside hardened Docker containers.
+
+Isolation guarantees enforced per job:
+  - No host network. Container joins `forge-internal` (internal: true).
+    Only the registry service is reachable.
+  - Read-only root filesystem. Writable space is tmpfs on /workspace and /tmp.
+  - 1.0 CPU, 512 MiB RAM, no swap, max 100 PIDs.
+  - --no-new-privileges and security-opt=no-new-privileges (defense in depth).
+  - --rm so the container disappears after exit.
+  - Exit 137 is treated as OOM kill and reported as such.
+
+The runner does NOT shell out and build a command string from user input.
+All container parameters go through the Docker SDK so there is no room
+for shell injection through job names, tokens, or build steps.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -12,7 +31,7 @@ import docker
 from docker.errors import APIError, ContainerError, ImageNotFound, NotFound
 from docker.models.containers import Container
 
-from .logs import LogWriter
+from logs import LogWriter
 
 log = logging.getLogger(__name__)
 
@@ -21,9 +40,9 @@ log = logging.getLogger(__name__)
 # Constants. Centralised so the security review has one place to read.
 # ---------------------------------------------------------------------------
 
-FORGE_NETWORK = "forge-internal"
-REGISTRY_HOST = "registry"
-REGISTRY_PORT = 8001
+#FORGE_NETWORK = "forge-internal"
+#REGISTRY_HOST = "registry"
+#REGISTRY_PORT = 8001
 
 # Resource limits.
 CPU_PERIOD = 100_000

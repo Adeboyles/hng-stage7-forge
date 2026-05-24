@@ -1,0 +1,17 @@
+name: test-large-logs
+version: 1.0.0
+
+jobs:
+  log-test:
+    runtime: alpine:3.18
+    resources:
+      cpu: 1.0
+      memory: 512Mi
+    steps:
+      - name: generate-large-logs
+        run: |
+          echo "Generating ~50MB of log output..."
+          for i in $(seq 1 500000); do
+            echo "Log line $i: this is a test log entry to verify streaming works correctly without buffering"
+          done
+          echo "Done generating logs"

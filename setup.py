@@ -11,7 +11,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "forge=cli.forge:cli",
+            "forge=cli.forge:main",
         ],
     },
 )

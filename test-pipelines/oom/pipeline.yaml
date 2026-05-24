@@ -1,0 +1,14 @@
+name: test-memory-exhaustion
+version: 1.0.0
+
+jobs:
+  oom-test:
+    runtime: alpine:3.18
+    resources:
+      cpu: 0.5
+      memory: 64Mi
+    steps:
+      - name: exhaust-memory
+        run: |
+          echo "Attempting memory exhaustion..."
+          dd if=/dev/zero bs=1M count=200 | cat > /dev/null

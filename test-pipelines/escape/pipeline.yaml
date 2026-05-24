@@ -1,0 +1,16 @@
+name: test-filesystem-escape
+version: 1.0.0
+
+jobs:
+  escape-test:
+    runtime: alpine:3.18
+    resources:
+      cpu: 0.5
+      memory: 256Mi
+    steps:
+      - name: try-escape
+        run: |
+          echo "Attempting filesystem escape..."
+          ls /host 2>/dev/null && echo "ESCAPE SUCCEEDED - BAD" || echo "Host FS not visible - ISOLATION OK"
+          ls /proc/1/root 2>/dev/null && echo "PROC ESCAPE - BAD" || echo "Proc escape blocked - ISOLATION OK"
+          cat /etc/shadow 2>/dev/null && echo "SHADOW READ - BAD" || echo "Shadow not readable - ISOLATION OK"

@@ -1,5 +1,0 @@
-flask==3.1.1
-pyyaml==6.0.2
-requests==2.32.3
-bcrypt==4.3.0
-click==8.1.8
