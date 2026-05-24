@@ -138,3 +138,192 @@ jobs:
     assert updates[-1]["status"] == "succeeded"
     assert updates[-1]["jobs"]["build"]["status"] == "succeeded"
     tmp_dir.cleanup()
+
+
+def test_get_run_returns_status_jobs_and_lockfile_url(monkeypatch):
+    engine_main = importlib.import_module("engine.main")
+
+    tmp_dir = tempfile.TemporaryDirectory()
+    db_path = Path(tmp_dir.name) / "engine.db"
+    monkeypatch.setattr(engine_main, "DB_PATH", db_path)
+    asyncio.run(engine_main.init_db())
+
+    async def fake_verify_token(_authorization):
+        return "good-token"
+
+    monkeypatch.setattr(engine_main, "verify_token", fake_verify_token)
+
+    asyncio.run(
+        _seed_run(
+            engine_main,
+            run_id="run-123",
+            pipeline_name="demo",
+            status="running",
+            lockfile={"packages": {"lib-core": {"version": "1.0.0"}}},
+            jobs={"build": {"status": "running"}},
+        )
+    )
+
+    with TestClient(engine_main.app) as client:
+        response = client.get("/runs/run-123", headers={"Authorization": "Bearer good-token"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "running",
+        "jobs": {"build": {"status": "running"}},
+        "lockfile_url": "/runs/run-123/lockfile",
+    }
+    tmp_dir.cleanup()
+
+
+def test_get_run_returns_404_for_missing_run(monkeypatch):
+    engine_main = importlib.import_module("engine.main")
+
+    tmp_dir = tempfile.TemporaryDirectory()
+    db_path = Path(tmp_dir.name) / "engine.db"
+    monkeypatch.setattr(engine_main, "DB_PATH", db_path)
+
+    async def fake_verify_token(_authorization):
+        return "good-token"
+
+    monkeypatch.setattr(engine_main, "verify_token", fake_verify_token)
+
+    with TestClient(engine_main.app) as client:
+        response = client.get("/runs/missing-run", headers={"Authorization": "Bearer good-token"})
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Run not found"}
+    tmp_dir.cleanup()
+
+
+def test_get_lockfile_returns_stored_json(monkeypatch):
+    engine_main = importlib.import_module("engine.main")
+
+    tmp_dir = tempfile.TemporaryDirectory()
+    db_path = Path(tmp_dir.name) / "engine.db"
+    monkeypatch.setattr(engine_main, "DB_PATH", db_path)
+    asyncio.run(engine_main.init_db())
+
+    async def fake_verify_token(_authorization):
+        return "good-token"
+
+    monkeypatch.setattr(engine_main, "verify_token", fake_verify_token)
+
+    lockfile = {"dependencies": [{"name": "lib-core", "version": "1.0.0"}]}
+    asyncio.run(
+        _seed_run(
+            engine_main,
+            run_id="run-456",
+            pipeline_name="demo",
+            status="succeeded",
+            lockfile=lockfile,
+            jobs={"build": {"status": "succeeded"}},
+        )
+    )
+
+    with TestClient(engine_main.app) as client:
+        response = client.get("/runs/run-456/lockfile", headers={"Authorization": "Bearer good-token"})
+
+    assert response.status_code == 200
+    assert response.json() == lockfile
+    tmp_dir.cleanup()
+
+
+def test_get_lockfile_returns_404_for_missing_run(monkeypatch):
+    engine_main = importlib.import_module("engine.main")
+
+    tmp_dir = tempfile.TemporaryDirectory()
+    db_path = Path(tmp_dir.name) / "engine.db"
+    monkeypatch.setattr(engine_main, "DB_PATH", db_path)
+
+    async def fake_verify_token(_authorization):
+        return "good-token"
+
+    monkeypatch.setattr(engine_main, "verify_token", fake_verify_token)
+
+    with TestClient(engine_main.app) as client:
+        response = client.get("/runs/missing-run/lockfile", headers={"Authorization": "Bearer good-token"})
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Run not found"}
+    tmp_dir.cleanup()
+
+
+def test_logs_endpoint_streams_backlog(monkeypatch):
+    engine_main = importlib.import_module("engine.main")
+
+    tmp_dir = tempfile.TemporaryDirectory()
+    db_path = Path(tmp_dir.name) / "engine.db"
+    log_dir = Path(tmp_dir.name) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(engine_main, "DB_PATH", db_path)
+    monkeypatch.setattr(engine_main, "LOG_DIR", log_dir)
+    asyncio.run(engine_main.init_db())
+
+    async def fake_verify_token(_authorization):
+        return "good-token"
+
+    monkeypatch.setattr(engine_main, "verify_token", fake_verify_token)
+
+    asyncio.run(
+        _seed_run(
+            engine_main,
+            run_id="run-789",
+            pipeline_name="demo",
+            status="running",
+            lockfile={},
+            jobs={"build": {"status": "running"}},
+        )
+    )
+
+    (log_dir / "run-789.log").write_text(
+        json.dumps({"ts": "2026-05-24T12:00:00.000Z", "job": "build", "line": "hello"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with TestClient(engine_main.app) as client:
+        response = client.get("/runs/run-789/logs?follow=false", headers={"Authorization": "Bearer good-token"})
+
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers["content-type"]
+    assert 'data: {"ts": "2026-05-24T12:00:00.000Z", "job": "build", "line": "hello"}' in response.text
+    tmp_dir.cleanup()
+
+
+def test_logs_endpoint_returns_404_for_missing_run(monkeypatch):
+    engine_main = importlib.import_module("engine.main")
+
+    tmp_dir = tempfile.TemporaryDirectory()
+    db_path = Path(tmp_dir.name) / "engine.db"
+    monkeypatch.setattr(engine_main, "DB_PATH", db_path)
+
+    async def fake_verify_token(_authorization):
+        return "good-token"
+
+    monkeypatch.setattr(engine_main, "verify_token", fake_verify_token)
+
+    with TestClient(engine_main.app) as client:
+        response = client.get("/runs/missing-run/logs?follow=false", headers={"Authorization": "Bearer good-token"})
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Run not found"}
+    tmp_dir.cleanup()
+
+
+async def _seed_run(engine_main, run_id, pipeline_name, status, lockfile, jobs):
+    async with engine_main.aiosqlite.connect(engine_main.DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO runs (id, pipeline_name, status, lockfile, jobs, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                pipeline_name,
+                status,
+                json.dumps(lockfile),
+                json.dumps(jobs),
+                "2026-05-24T12:00:00+00:00",
+            ),
+        )
+        await db.commit()

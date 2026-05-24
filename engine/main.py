@@ -1,27 +1,40 @@
 import uuid
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import aiosqlite
 from fastapi import FastAPI, UploadFile, File, Header, HTTPException
+from fastapi.responses import StreamingResponse
 
 try:
     from .parser import parse_pipeline_text as parse_pipeline, PipelineValidationError
     from .scheduler import DAGScheduler, SchedulerError
+    from .logs import tail_log
     from . import slack
 except ImportError:  # pragma: no cover - supports running as `uvicorn main:app` from /app
     from parser import parse_pipeline_text as parse_pipeline, PipelineValidationError
     from scheduler import DAGScheduler, SchedulerError
+    from logs import tail_log
     import slack
 
-app = FastAPI(title="Forge CI Engine")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Initialize persistent engine resources before serving requests."""
+    await init_db()
+    yield
+
+
+app = FastAPI(title="Forge CI Engine", lifespan=lifespan)
 
 # ── DB ───────────────────────────────────────────────
 
 DB_PATH = Path("/tmp/engine.db")
+LOG_DIR = Path("/var/forge/logs")
 DEFAULT_CONCURRENCY_LIMIT = 4
 
 
@@ -40,12 +53,6 @@ async def init_db():
             )
         """)
         await db.commit()
-
-
-@app.on_event("startup")
-async def startup():
-    await init_db()
-
 
 # ── Auth ──────────────────────────────────────────────
 
@@ -106,6 +113,43 @@ async def create_run(
     asyncio.create_task(execute_pipeline(run_id, pipeline_def, token))
 
     return {"run_id": run_id}
+
+
+@app.get("/runs/{run_id}")
+async def get_run(run_id: str, authorization: Optional[str] = Header(None)):
+    """Return the persisted run status, per-job status, and lockfile URL."""
+    await verify_token(authorization)
+    row = await _fetch_run_row(run_id)
+    return {
+        "status": row["status"],
+        "jobs": json.loads(row["jobs"] or "{}"),
+        "lockfile_url": f"/runs/{run_id}/lockfile",
+    }
+
+
+@app.get("/runs/{run_id}/lockfile")
+async def get_lockfile(run_id: str, authorization: Optional[str] = Header(None)):
+    """Return the exact lockfile JSON stored for a run."""
+    await verify_token(authorization)
+    row = await _fetch_run_row(run_id)
+    return json.loads(row["lockfile"] or "{}")
+
+
+@app.get("/runs/{run_id}/logs")
+async def stream_run_logs(
+    run_id: str,
+    follow: bool = False,
+    authorization: Optional[str] = Header(None),
+):
+    """Stream persisted run logs over Server-Sent Events."""
+    await verify_token(authorization)
+    await _fetch_run_row(run_id)
+    log_path = str(LOG_DIR / f"{run_id}.log")
+    return StreamingResponse(
+        tail_log(log_path, follow=follow),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 # ── PIPELINE EXECUTION ───────────────────────────────
@@ -244,6 +288,22 @@ async def update_run_status(run_id, status, started_at=None, finished_at=None, j
             values
         )
         await db.commit()
+
+
+async def _fetch_run_row(run_id: str) -> dict:
+    """Load a run row or raise 404 if the run does not exist."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute(
+            "SELECT id, status, lockfile, jobs FROM runs WHERE id=?",
+            (run_id,),
+        )
+        row = await cursor.fetchone()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    return dict(row)
 
 
 # ── DEPENDENCY RESOLUTION ───────────────────────────
