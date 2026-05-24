@@ -1,8 +1,9 @@
 import os
+import sys
 import sqlite3
 import secrets
 import datetime
-from functools import wraps
+import argparse
 from fastapi import Request, HTTPException
 import bcrypt
 import yaml
@@ -45,7 +46,7 @@ def create_token(name):
     salt = bcrypt.gensalt(rounds=12)
     token_hash = bcrypt.hashpw(raw_token.encode("utf-8"), salt).decode("utf-8")
 
-    created_at = datetime.datetime.utcnow().isoformat() + "Z"
+    created_at = datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z")
 
     conn = get_db()
     try:
@@ -120,3 +121,48 @@ def revoke_token(name):
     deleted = cursor.rowcount > 0
     conn.close()
     return deleted
+
+
+def main():
+    """Host-side token administration CLI."""
+    parser = argparse.ArgumentParser(prog="forge-token", description="Forge token administration")
+    subparsers = parser.add_subparsers(dest="command")
+
+    create_parser = subparsers.add_parser("create", help="Create a token")
+    create_parser.add_argument("name", help="Token identity/name")
+
+    subparsers.add_parser("list", help="List tokens")
+
+    revoke_parser = subparsers.add_parser("revoke", help="Revoke a token")
+    revoke_parser.add_argument("name", help="Token identity/name")
+
+    args = parser.parse_args()
+
+    if args.command == "create":
+        token = create_token(args.name)
+        print(f"Created token for {args.name}")
+        print(token)
+        return
+
+    if args.command == "list":
+        tokens = list_tokens()
+        if not tokens:
+            print("No tokens found.")
+            return
+        for token in tokens:
+            print(f"{token['name']}\t{token['created_at']}")
+        return
+
+    if args.command == "revoke":
+        if revoke_token(args.name):
+            print(f"Revoked token '{args.name}'")
+            return
+        print(f"Token '{args.name}' not found")
+        sys.exit(1)
+
+    parser.print_help()
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
