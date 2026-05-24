@@ -1,4 +1,4 @@
-# Forge — CI/CD Platform with Integrated Artifact Registry
+	# Forge — CI/CD Platform with Integrated Artifact Registry
 
 A self-hosted CI/CD platform with an integrated artifact registry.
 Two cooperating subsystems with one HTTP API.
@@ -32,14 +32,10 @@ docker compose up -d
 
 # 5. Create first auth token
 docker compose exec registry python3 -c "
-from registry.auth import AuthManager
-import asyncio
-async def main():
-    auth = AuthManager('data/artifacts/registry.db')
-    await auth.init()
-    token = await auth.create_token('admin')
-    print(f'Token: {token}')
-asyncio.run(main())
+from auth import create_token
+token = create_token('admin')
+print(f'Token: {token}')
+print('Save this! It will never be shown again.')
 "
 
 # 6. Login with CLI
