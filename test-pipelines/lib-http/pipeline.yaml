@@ -18,7 +18,8 @@ jobs:
         run: "mkdir -p src && echo 'lib-http source' > src/index.sh"
       - name: package
         run: "tar czf out.tar.gz src/"
-    artifacts:
-      - name: lib-http
-        version: 1.0.0
-        path: ./out.tar.gz
+        
+artifacts:
+  - name: lib-http
+    version: 1.0.0
+    path: ./out.tar.gz

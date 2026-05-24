@@ -22,7 +22,8 @@ jobs:
         run: "mkdir -p src && echo 'service-api source' > src/index.sh"
       - name: package
         run: "tar czf out.tar.gz src/"
-    artifacts:
-      - name: service-api
-        version: 0.1.0
-        path: ./out.tar.gz
+
+artifacts:
+  - name: service-api
+    version: 0.1.0
+    path: ./out.tar.gz
