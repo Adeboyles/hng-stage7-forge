@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -107,6 +108,7 @@ class JobRunner:
         isolation_config = isolation_settings()
         self.client = docker_client or docker.from_env()
         self.log_dir = log_dir or engine_config.get("log_base", "/var/forge/logs")
+        self.workspace_base = engine_config.get("workspace_base", "/data/workspaces")
         self.network_name = isolation_config.get("network_name", "forge-internal")
         self.registry_url = registry_internal_base_url()
         default_cpu = float(isolation_config.get("default_cpu", 1.0))
@@ -170,6 +172,7 @@ class JobRunner:
     def run(self, spec: JobSpec) -> JobResult:
         """Run one job. Blocks until the container exits or is killed."""
         log_path = os.path.join(self.log_dir, f"{spec.run_id}.log")
+        workspace_path = self._workspace_path(spec.run_id)
         writer = LogWriter(log_path, job=spec.step_name)
 
         writer.write(f"--- starting step {spec.step_name} ---")
@@ -198,8 +201,10 @@ class JobRunner:
                 # --- isolation ---
                 read_only=True,
                 tmpfs={
-                    "/workspace": "rw,size=256m,mode=1777",
                     "/tmp": "rw,size=64m,mode=1777",
+                },
+                volumes={
+                    workspace_path: {"bind": "/workspace", "mode": "rw"},
                 },
                 working_dir="/workspace",
                 user="nobody",                   # don't run as root in the container
@@ -301,6 +306,12 @@ class JobRunner:
         # Anything still in the buffer (no trailing newline) is the last partial line.
         if buffer:
             writer.write(buffer.decode("utf-8", errors="replace"))
+
+    def _workspace_path(self, run_id: str) -> str:
+        """Return the host workspace directory for a pipeline run."""
+        path = os.path.abspath(os.path.join(self.workspace_base, run_id))
+        os.makedirs(path, exist_ok=True)
+        return path
 
     def _was_oom_killed(self, container: Container, exit_code: int) -> bool:
         """

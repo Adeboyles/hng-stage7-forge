@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -151,18 +152,30 @@ class DAGScheduler:
         for batch in batches:
             for chunk in _chunked(batch, self.concurrency_limit):
                 completed: list[tuple[str, str]] = []
+                runnable_jobs: list[str] = []
 
                 for job_name in chunk:
                     if any(statuses[dependency] != "succeeded" for dependency in self.graph[job_name]):
                         statuses[job_name] = "skipped"
                         continue
-
                     statuses[job_name] = "running"
-                    raw_result = executor(job_name, self.pipeline.jobs[job_name])
-                    result = _coerce_executor_status(raw_result)
-                    executor_results[job_name] = raw_result
-                    statuses[job_name] = result
-                    completed.append((job_name, result))
+                    runnable_jobs.append(job_name)
+
+                with ThreadPoolExecutor(max_workers=len(runnable_jobs) or 1) as pool:
+                    future_by_job = {
+                        job_name: pool.submit(executor, job_name, self.pipeline.jobs[job_name])
+                        for job_name in runnable_jobs
+                    }
+
+                    for job_name, future in future_by_job.items():
+                        try:
+                            raw_result = future.result()
+                        except Exception as exc:  # pragma: no cover - defensive executor boundary
+                            raise SchedulerError(f"executor crashed while running job '{job_name}': {exc}") from exc
+                        result = _coerce_executor_status(raw_result)
+                        executor_results[job_name] = raw_result
+                        statuses[job_name] = result
+                        completed.append((job_name, result))
 
                 for job_name, result in completed:
                     if result == "failed":

@@ -1,4 +1,5 @@
 from textwrap import dedent
+import threading
 from types import SimpleNamespace
 
 from engine.parser import parse_pipeline_text
@@ -137,3 +138,50 @@ def test_scheduler_accepts_runner_style_job_results():
 
     assert result.job_statuses["build"] == "succeeded"
     assert result.executor_results["build"].exit_code == 0
+
+
+def test_scheduler_runs_independent_jobs_in_parallel_up_to_limit():
+    pipeline = parse_pipeline_text(
+        dedent(
+            """
+            name: demo
+            version: 1.0.0
+            jobs:
+              lint:
+                runtime: alpine:3.18
+                resources: { cpu: 1.0, memory: 128Mi }
+                steps: [{ name: lint, run: echo lint }]
+              test:
+                runtime: alpine:3.18
+                resources: { cpu: 1.0, memory: 128Mi }
+                steps: [{ name: test, run: echo test }]
+            artifacts:
+              - name: demo
+                version: 1.0.0
+                path: ./out.tar.gz
+            """
+        )
+    )
+
+    scheduler = DAGScheduler(pipeline, concurrency_limit=2)
+    lock = threading.Lock()
+    release = threading.Event()
+    counts: list[int] = []
+    started = 0
+
+    def executor(job_name, job_definition):
+        nonlocal started
+        with lock:
+            started += 1
+            counts.append(started)
+            if started == 2:
+                release.set()
+        assert release.wait(0.5), "jobs did not overlap in execution"
+        with lock:
+            started -= 1
+        return "succeeded"
+
+    result = scheduler.run(executor)
+
+    assert max(counts) == 2
+    assert result.job_statuses == {"lint": "succeeded", "test": "succeeded"}
