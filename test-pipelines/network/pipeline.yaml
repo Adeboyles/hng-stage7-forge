@@ -1,0 +1,19 @@
+name: test-network-isolation
+version: 1.0.0
+
+jobs:
+  network-test:
+    runtime: alpine:3.18
+    resources:
+      cpu: 0.5
+      memory: 256Mi
+    steps:
+      - name: try-external-network
+        run: |
+          echo "Attempting external network access..."
+          wget -q --timeout=5 https://google.com -O /dev/null \
+            && echo "EXTERNAL ACCESS - BAD" \
+            || echo "External network blocked - ISOLATION OK"
+          wget -q --timeout=5 https://registry.npmjs.org -O /dev/null \
+            && echo "NPM ACCESS - BAD" \
+            || echo "NPM blocked - ISOLATION OK"

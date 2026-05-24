@@ -1,0 +1,28 @@
+name: build-service-api
+version: 0.1.0
+
+dependencies:
+  - name: lib-core
+    version: "^1.0.0"
+  - name: lib-http
+    version: "^1.0.0"
+
+jobs:
+  build:
+    runtime: alpine:3.18
+    resources:
+      cpu: 0.5
+      memory: 256Mi
+    steps:
+      - name: check-deps
+        run: |
+          ls /deps/lib-core/ && echo 'lib-core available'
+          ls /deps/lib-http/ && echo 'lib-http available'
+      - name: create-source
+        run: "mkdir -p src && echo 'service-api source' > src/index.sh"
+      - name: package
+        run: "tar czf out.tar.gz src/"
+    artifacts:
+      - name: service-api
+        version: 0.1.0
+        path: ./out.tar.gz
