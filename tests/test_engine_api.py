@@ -366,6 +366,95 @@ jobs:
     tmp_dir.cleanup()
 
 
+def test_execute_pipeline_publishes_declared_artifacts_after_success(monkeypatch):
+    engine_main = importlib.import_module("engine.main")
+    tmp_dir = tempfile.TemporaryDirectory()
+    base = Path(tmp_dir.name)
+    db_path = base / "engine.db"
+    log_dir = base / "logs"
+    workspace_base = base / "workspaces"
+    monkeypatch.setattr(engine_main, "DB_PATH", db_path)
+    monkeypatch.setattr(engine_main, "LOG_DIR", log_dir)
+    monkeypatch.setattr(engine_main, "WORKSPACE_BASE", workspace_base)
+    asyncio.run(engine_main.init_db())
+    pipeline = parse_pipeline_text(
+        """
+name: demo
+version: 1.0.0
+jobs:
+  build:
+    runtime: alpine:3.18
+    resources:
+      cpu: 1.0
+      memory: 128Mi
+    steps:
+      - name: package
+        run: echo package
+artifacts:
+  - name: demo-lib
+    version: 1.0.0
+    path: ./out.tar.gz
+"""
+    )
+
+    updates = []
+    published = []
+
+    async def fake_update_run_status(run_id, status, started_at=None, finished_at=None, jobs=None):
+        updates.append({"status": status, "finished_at": finished_at, "jobs": jobs})
+
+    async def fake_resolve_dependencies(_deps, _token):
+        return {}
+
+    async def fake_publish_artifact(path, name, version, token, **kwargs):
+        published.append((path, name, version, token, kwargs.get("deps")))
+
+    async def fake_notify(*_args, **_kwargs):
+        return None
+
+    class FakeRunner:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, spec):
+            artifact_path = workspace_base / spec.run_id / "out.tar.gz"
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_bytes(b"artifact-bytes")
+            return SimpleNamespace(exit_code=0, duration_s=0.1, timed_out=False, oom_killed=False)
+
+    class FakeJobSpec:
+        def __init__(self, run_id, step_name, script, image, extra_env):
+            self.run_id = run_id
+            self.step_name = step_name
+            self.script = script
+            self.image = image
+            self.extra_env = extra_env
+
+    monkeypatch.setattr(engine_main, "update_run_status", fake_update_run_status)
+    monkeypatch.setattr(engine_main, "resolve_dependencies", fake_resolve_dependencies)
+    monkeypatch.setattr(engine_main, "publish_artifact", fake_publish_artifact)
+    monkeypatch.setattr(engine_main.slack, "notify_pipeline_started", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_pipeline_succeeded", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_pipeline_failed", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_resolution_failure", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_integrity_failure", fake_notify)
+    monkeypatch.setattr(engine_main, "_load_runner_types", lambda: (FakeRunner, FakeJobSpec))
+
+    asyncio.run(engine_main.execute_pipeline("run-publish", pipeline, "good-token"))
+
+    assert updates[-1]["status"] == "succeeded"
+    assert published == [
+        (
+            workspace_base / "run-publish" / "out.tar.gz",
+            "demo-lib",
+            "1.0.0",
+            "good-token",
+            [],
+        )
+    ]
+    tmp_dir.cleanup()
+
+
 def test_get_run_returns_status_jobs_and_lockfile_url(monkeypatch):
     engine_main = importlib.import_module("engine.main")
 

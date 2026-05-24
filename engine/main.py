@@ -13,6 +13,7 @@ from typing import Optional
 import aiosqlite
 from fastapi import FastAPI, UploadFile, File, Header, HTTPException
 from fastapi.responses import StreamingResponse
+import httpx
 
 try:
     from .config import engine_settings, registry_internal_base_url
@@ -292,6 +293,26 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
     ).seconds
 
     if final_status == "succeeded":
+        try:
+            await publish_pipeline_artifacts(
+                run_id,
+                pipeline_def,
+                token,
+            )
+        except Exception as e:
+            final_status = "failed"
+            await update_run_status(
+                run_id,
+                final_status,
+                finished_at=finished_at,
+                jobs=job_results,
+            )
+            _log_system(run_id, f"artifact publish failed: {e}")
+            _finish_run_log(run_id)
+            await slack.notify_pipeline_failed(
+                pipeline_name, run_id, f"{duration}s", "artifact_publish"
+            )
+            return
         await slack.notify_pipeline_succeeded(pipeline_name, run_id, f"{duration}s")
     else:
         await slack.notify_pipeline_failed(
@@ -384,13 +405,55 @@ async def materialize_dependencies(run_id: str, lockfile: dict, token: str) -> N
 
 async def download_artifact(name: str, version: str, token: str) -> bytes:
     """Fetch one resolved artifact blob from the registry."""
-    del token
-    import httpx
-
     async with httpx.AsyncClient() as client:
         resp = await client.get(f"{registry_internal_base_url()}/artifacts/{name}/{version}")
         resp.raise_for_status()
         return resp.content
+
+
+async def publish_pipeline_artifacts(run_id: str, pipeline_def, token: str) -> None:
+    """Publish all declared top-level artifacts from the run workspace."""
+    deps_payload = [
+        {"name": dep.name, "version": dep.version}
+        for dep in pipeline_def.dependencies
+    ]
+    workspace = _workspace_path(run_id)
+    for artifact in pipeline_def.artifacts:
+        artifact_path = (workspace / artifact.path).resolve()
+        await publish_artifact(
+            artifact_path,
+            artifact.name,
+            artifact.version,
+            token,
+            deps=deps_payload,
+        )
+        _log_system(run_id, f"published artifact {artifact.name}@{artifact.version}")
+
+
+async def publish_artifact(
+    path: Path,
+    name: str,
+    version: str,
+    token: str,
+    *,
+    deps: list[dict[str, str]] | None = None,
+) -> None:
+    """Upload one built artifact to the registry with server-side checksum verification."""
+    payload = path.read_bytes()
+    checksum = "sha256:" + hashlib.sha256(payload).hexdigest()
+    data = {"checksum": checksum}
+    if deps:
+        data["deps"] = json.dumps(deps, sort_keys=True, separators=(",", ":"))
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{registry_internal_base_url()}/artifacts/{name}/{version}",
+            headers={"Authorization": f"Bearer {token}"},
+            files={"file": (path.name, payload, "application/octet-stream")},
+            data=data,
+            timeout=120.0,
+        )
+        resp.raise_for_status()
 
 
 def _unpack_dependency_bytes(payload: bytes, target_dir: Path) -> None:
