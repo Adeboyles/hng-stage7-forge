@@ -4,7 +4,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from parser import JobDefinition, PipelineDefinition
+try:
+    from .parser import JobDefinition, PipelineDefinition
+except ImportError:  # pragma: no cover - supports running as /app modules
+    from parser import JobDefinition, PipelineDefinition
 
 
 TERMINAL_STATUSES = {"succeeded", "failed", "skipped"}

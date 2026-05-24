@@ -8,16 +8,21 @@ from typing import Optional
 import aiosqlite
 from fastapi import FastAPI, UploadFile, File, Header, HTTPException
 
-from parser import parse_pipeline_text as parse_pipeline, PipelineValidationError
-from scheduler import DAGScheduler
-from runner import JobRunner, JobSpec
-import slack
+try:
+    from .parser import parse_pipeline_text as parse_pipeline, PipelineValidationError
+    from .scheduler import DAGScheduler, SchedulerError
+    from . import slack
+except ImportError:  # pragma: no cover - supports running as `uvicorn main:app` from /app
+    from parser import parse_pipeline_text as parse_pipeline, PipelineValidationError
+    from scheduler import DAGScheduler, SchedulerError
+    import slack
 
 app = FastAPI(title="Forge CI Engine")
 
 # ── DB ───────────────────────────────────────────────
 
 DB_PATH = Path("/tmp/engine.db")
+DEFAULT_CONCURRENCY_LIMIT = 4
 
 
 async def init_db():
@@ -136,55 +141,57 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
     # -----------------------------
     # DAG execution
     # -----------------------------
-    scheduler = DAGScheduler()
-    jobs = pipeline_def.jobs
-
     try:
-        execution_order = scheduler.build_and_sort(jobs)
-    except Exception as e:
+        scheduler = DAGScheduler(
+            pipeline_def,
+            concurrency_limit=DEFAULT_CONCURRENCY_LIMIT,
+        )
+    except SchedulerError as e:
         await update_run_status(run_id, "cycle_failure")
         await slack.notify_resolution_failure(pipeline_name, run_id, str(e))
         return
 
+    JobRunner, JobSpec = _load_runner_types()
     runner = JobRunner()
-
-    job_results = {}
-    final_status = "succeeded"
     failing_job = None
 
-    for job_name in execution_order:
-        job_def = jobs[job_name]
-
-        needs = job_def.needs
-
-        # Skip if dependency failed
-        if any(job_results.get(n, {}).get("status") != "succeeded" for n in needs):
-            job_results[job_name] = {"status": "skipped"}
-            continue
-
-        # Build JobSpec (THIS is what your runner expects)
-        script = job_def.to_shell_script()
-
+    def executor(job_name, job_def):
         spec = JobSpec(
             run_id=run_id,
             step_name=job_name,
-            script=script,
+            script=job_def.to_shell_script(),
             image=job_def.runtime,
-            extra_env={}
+            extra_env={},
         )
+        return runner.run(spec)
 
-        result = runner.run(spec)
+    try:
+        run_result = scheduler.run(executor)
+    except SchedulerError as e:
+        await update_run_status(run_id, "failed")
+        await slack.notify_pipeline_failed(pipeline_name, run_id, "0s", "scheduler")
+        await slack.notify_resolution_failure(pipeline_name, run_id, str(e))
+        return
 
-        job_results[job_name] = {
-            "status": "succeeded" if result.exit_code == 0 else "failed",
-            "exit_code": result.exit_code,
-            "duration_s": result.duration_s
-        }
+    job_results = {}
+    final_status = "succeeded"
 
-        if result.exit_code != 0:
-            final_status = "failed"
+    for job_name in sorted(pipeline_def.jobs):
+        status = run_result.job_statuses[job_name]
+        job_result = {"status": status}
+        executor_result = run_result.executor_results.get(job_name)
+
+        if executor_result is not None:
+            if hasattr(executor_result, "exit_code"):
+                job_result["exit_code"] = executor_result.exit_code
+            if hasattr(executor_result, "duration_s"):
+                job_result["duration_s"] = executor_result.duration_s
+
+        job_results[job_name] = job_result
+
+        if status == "failed" and failing_job is None:
             failing_job = job_name
-            break
+            final_status = "failed"
 
     # -----------------------------
     # Finalize
@@ -255,3 +262,12 @@ async def resolve_dependencies(deps, token):
             raise Exception(resp.text)
 
         return resp.json()
+
+
+def _load_runner_types():
+    """Import runner types lazily so engine.main can load without Docker SDK."""
+    try:
+        from .runner import JobRunner, JobSpec
+    except ImportError:  # pragma: no cover - supports running as `uvicorn main:app` from /app
+        from runner import JobRunner, JobSpec
+    return JobRunner, JobSpec

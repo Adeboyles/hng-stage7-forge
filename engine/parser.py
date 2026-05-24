@@ -58,6 +58,7 @@ class PipelineDefinition:
     version: str
     dependencies: tuple[DependencySpec, ...]
     jobs: dict[str, JobDefinition]
+    artifacts: tuple[ArtifactDefinition, ...] = ()
 
 
 # ─────────────────────────────
@@ -85,18 +86,21 @@ def parse_pipeline_text(text: str) -> PipelineDefinition:
 
     root_map = _require_mapping(root, "$")
     data = _mapping_to_dict(root_map, "$")
+    _validate_top_level_fields(data)
 
     name = _require_str(data, "name", "$")
     version = _require_str(data, "version", "$")
 
     dependencies = _parse_dependencies(data.get("dependencies"), "dependencies")
     jobs = _parse_jobs(data)
+    artifacts = _parse_artifacts(data.get("artifacts"), "artifacts")
 
     return PipelineDefinition(
         name=name,
         version=version,
         dependencies=dependencies,
         jobs=jobs,
+        artifacts=artifacts,
     )
 
 
@@ -131,7 +135,7 @@ def _parse_jobs(root: dict[str, Node]) -> dict[str, JobDefinition]:
     jobs = {}
 
     for key_node, value_node in jobs_map.value:
-        job_name = _require_scalar(key_node)
+        job_name = _require_scalar(key_node, "jobs")
         job_path = f"jobs.{job_name}"
 
         fields = _mapping_to_dict(_require_mapping(value_node, job_path), job_path)
@@ -150,6 +154,33 @@ def _parse_jobs(root: dict[str, Node]) -> dict[str, JobDefinition]:
         )
 
     return jobs
+
+
+def _parse_artifacts(node: Node | None, path: str):
+    if node is None:
+        return ()
+
+    artifacts = []
+    seen = set()
+
+    for i, item in enumerate(_require_sequence(node, path).value):
+        item_path = f"{path}[{i}]"
+        mp = _mapping_to_dict(_require_mapping(item, item_path), item_path)
+        name = _require_str(mp, "name", item_path)
+        version = _require_str(mp, "version", item_path)
+        artifact_path = _require_str(mp, "path", item_path)
+        coordinate = (name, version)
+        if coordinate in seen:
+            raise PipelineValidationError(
+                f"duplicate artifact coordinate '{name}@{version}'",
+                1,
+                1,
+                item_path,
+            )
+        seen.add(coordinate)
+        artifacts.append(ArtifactDefinition(name=name, version=version, path=artifact_path))
+
+    return tuple(artifacts)
 
 
 # ─────────────────────────────
@@ -213,6 +244,13 @@ def _mapping_to_dict(node: MappingNode, path: str) -> dict[str, Node]:
     for k, v in node.value:
         out[_require_scalar(k, path)] = v
     return out
+
+
+def _validate_top_level_fields(data: dict[str, Node]) -> None:
+    allowed = {"name", "version", "dependencies", "jobs", "artifacts"}
+    for key in data:
+        if key not in allowed:
+            raise PipelineValidationError(f"unknown field '{key}'", 4, 1, "$")
 
 
 def _require_field(data: dict, key: str, path: str) -> Node:
