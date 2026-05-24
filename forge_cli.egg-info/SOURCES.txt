@@ -1,0 +1,9 @@
+README.md
+setup.py
+forge_cli.egg-info/PKG-INFO
+forge_cli.egg-info/SOURCES.txt
+forge_cli.egg-info/dependency_links.txt
+forge_cli.egg-info/entry_points.txt
+forge_cli.egg-info/requires.txt
+forge_cli.egg-info/top_level.txt
+tests/test_registry_core.py
