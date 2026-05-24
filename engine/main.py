@@ -1,6 +1,10 @@
 import uuid
 import asyncio
+import hashlib
+import io
 import json
+import shutil
+import tarfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,15 +16,15 @@ from fastapi.responses import StreamingResponse
 
 try:
     from .config import engine_settings, registry_internal_base_url
+    from .logs import append_eof, append_log_line, tail_log
     from .parser import parse_pipeline_text as parse_pipeline, PipelineValidationError
     from .scheduler import DAGScheduler, SchedulerError
-    from .logs import tail_log
     from . import slack
 except ImportError:  # pragma: no cover - supports running as `uvicorn main:app` from /app
     from config import engine_settings, registry_internal_base_url
+    from logs import append_eof, append_log_line, tail_log
     from parser import parse_pipeline_text as parse_pipeline, PipelineValidationError
     from scheduler import DAGScheduler, SchedulerError
-    from logs import tail_log
     import slack
 
 
@@ -38,6 +42,7 @@ app = FastAPI(title="Forge CI Engine", lifespan=lifespan)
 
 DB_PATH = Path("/tmp/engine.db")
 LOG_DIR = Path(ENGINE_CONFIG.get("log_base", "/var/forge/logs"))
+WORKSPACE_BASE = Path(ENGINE_CONFIG.get("workspace_base", "/data/workspaces"))
 DEFAULT_CONCURRENCY_LIMIT = int(ENGINE_CONFIG.get("max_concurrency", 4))
 
 
@@ -175,6 +180,8 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
             lockfile = await resolve_dependencies(deps, token)
         except Exception as e:
             await update_run_status(run_id, "conflict_failure")
+            _log_system(run_id, f"dependency resolution failed: {e}")
+            _finish_run_log(run_id)
             await slack.notify_resolution_failure(pipeline_name, run_id, str(e))
             return
 
@@ -184,6 +191,19 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
             (json.dumps(lockfile), run_id)
         )
         await db.commit()
+
+    try:
+        await materialize_dependencies(run_id, lockfile, token)
+    except IntegrityFailureError as e:
+        finished_at = datetime.now(timezone.utc).isoformat()
+        _log_system(
+            run_id,
+            f"integrity failure for {e.artifact}: expected sha256 {e.expected_sha}, actual sha256 {e.actual_sha}",
+        )
+        await update_run_status(run_id, "integrity_failure", finished_at=finished_at, jobs={})
+        _finish_run_log(run_id)
+        await slack.notify_integrity_failure(e.artifact, e.expected_sha, e.actual_sha, run_id)
+        return
 
     # -----------------------------
     # DAG execution
@@ -195,6 +215,8 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
         )
     except SchedulerError as e:
         await update_run_status(run_id, "cycle_failure")
+        _log_system(run_id, f"job graph cycle detected: {e}")
+        _finish_run_log(run_id)
         await slack.notify_resolution_failure(pipeline_name, run_id, str(e))
         return
 
@@ -203,7 +225,9 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
         runner = JobRunner(log_dir=str(LOG_DIR))
     except Exception as e:
         finished_at = datetime.now(timezone.utc).isoformat()
+        _log_system(run_id, f"runner initialization failed: {e}")
         await update_run_status(run_id, "failed", finished_at=finished_at, jobs={})
+        _finish_run_log(run_id)
         await slack.notify_pipeline_failed(pipeline_name, run_id, "0s", "runner_init")
         await slack.notify_resolution_failure(pipeline_name, run_id, str(e))
         return
@@ -223,6 +247,8 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
         run_result = scheduler.run(executor)
     except SchedulerError as e:
         await update_run_status(run_id, "failed")
+        _log_system(run_id, f"scheduler execution failed: {e}")
+        _finish_run_log(run_id)
         await slack.notify_pipeline_failed(pipeline_name, run_id, "0s", "scheduler")
         await slack.notify_resolution_failure(pipeline_name, run_id, str(e))
         return
@@ -258,6 +284,7 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
         finished_at=finished_at,
         jobs=job_results
     )
+    _finish_run_log(run_id)
 
     duration = (
         datetime.fromisoformat(finished_at) -
@@ -314,6 +341,102 @@ async def _fetch_run_row(run_id: str) -> dict:
         raise HTTPException(status_code=404, detail="Run not found")
 
     return dict(row)
+
+
+class IntegrityFailureError(Exception):
+    """Raised when a downloaded dependency does not match the lockfile SHA-256."""
+
+    def __init__(self, artifact: str, expected_sha: str, actual_sha: str):
+        self.artifact = artifact
+        self.expected_sha = expected_sha
+        self.actual_sha = actual_sha
+        super().__init__(
+            f"integrity failure for {artifact}: expected {expected_sha}, got {actual_sha}"
+        )
+
+
+async def materialize_dependencies(run_id: str, lockfile: dict, token: str) -> None:
+    """Download, verify, and unpack lockfile dependencies into the shared workspace."""
+    resolved = lockfile.get("resolved", {})
+    if not resolved:
+        return
+
+    deps_root = _deps_root(run_id)
+    deps_root.mkdir(parents=True, exist_ok=True)
+
+    for name in sorted(resolved):
+        entry = resolved[name]
+        version = entry["version"]
+        expected_sha = entry["sha256"]
+        artifact = f"{name}@{version}"
+        _log_system(run_id, f"pulling dependency {artifact}")
+        payload = await download_artifact(name, version, token)
+        actual_sha = hashlib.sha256(payload).hexdigest()
+        if actual_sha != expected_sha:
+            raise IntegrityFailureError(artifact, expected_sha, actual_sha)
+        package_dir = deps_root / name
+        if package_dir.exists():
+            shutil.rmtree(package_dir)
+        package_dir.mkdir(parents=True, exist_ok=True)
+        _unpack_dependency_bytes(payload, package_dir)
+        _log_system(run_id, f"verified dependency {artifact} sha256 {actual_sha}")
+
+
+async def download_artifact(name: str, version: str, token: str) -> bytes:
+    """Fetch one resolved artifact blob from the registry."""
+    del token
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{registry_internal_base_url()}/artifacts/{name}/{version}")
+        resp.raise_for_status()
+        return resp.content
+
+
+def _unpack_dependency_bytes(payload: bytes, target_dir: Path) -> None:
+    """Extract an archive into the dependency directory, or store raw bytes if not archived."""
+    try:
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as archive:
+            _safe_extract_tar(archive, target_dir)
+            return
+    except tarfile.TarError:
+        pass
+
+    (target_dir / "artifact.bin").write_bytes(payload)
+
+
+def _safe_extract_tar(archive: tarfile.TarFile, target_dir: Path) -> None:
+    """Extract tar members while preventing path traversal outside the target directory."""
+    base = target_dir.resolve()
+    for member in archive.getmembers():
+        destination = (target_dir / member.name).resolve()
+        if not str(destination).startswith(str(base)):
+            raise IntegrityFailureError(member.name, "safe-path", "path-traversal")
+    archive.extractall(target_dir)
+
+
+def _workspace_path(run_id: str) -> Path:
+    """Return the shared workspace directory for one pipeline run."""
+    path = WORKSPACE_BASE / run_id
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _deps_root(run_id: str) -> Path:
+    """Return the dependency directory inside the run workspace."""
+    return _workspace_path(run_id) / "deps"
+
+
+def _run_log_path(run_id: str) -> str:
+    return str(LOG_DIR / f"{run_id}.log")
+
+
+def _log_system(run_id: str, line: str) -> None:
+    append_log_line(_run_log_path(run_id), "system", line)
+
+
+def _finish_run_log(run_id: str) -> None:
+    append_eof(_run_log_path(run_id), "system")
 
 
 # ── DEPENDENCY RESOLUTION ───────────────────────────

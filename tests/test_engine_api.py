@@ -1,6 +1,9 @@
 import asyncio
+import hashlib
 import importlib
+import io
 import json
+import tarfile
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -212,6 +215,157 @@ jobs:
     tmp_dir.cleanup()
 
 
+def test_execute_pipeline_materializes_dependencies_before_running_jobs(monkeypatch):
+    engine_main = importlib.import_module("engine.main")
+    tmp_dir = tempfile.TemporaryDirectory()
+    base = Path(tmp_dir.name)
+    db_path = base / "engine.db"
+    log_dir = base / "logs"
+    workspace_base = base / "workspaces"
+    monkeypatch.setattr(engine_main, "DB_PATH", db_path)
+    monkeypatch.setattr(engine_main, "LOG_DIR", log_dir)
+    monkeypatch.setattr(engine_main, "WORKSPACE_BASE", workspace_base)
+    asyncio.run(engine_main.init_db())
+    pipeline = parse_pipeline_text(
+        """
+name: demo
+version: 1.0.0
+dependencies:
+  - name: lib-core
+    version: ^1.0.0
+jobs:
+  build:
+    runtime: alpine:3.18
+    resources:
+      cpu: 1.0
+      memory: 128Mi
+    steps:
+      - name: build
+        run: ls deps/lib-core
+"""
+    )
+
+    archive_bytes = _make_tar_bytes({"src/core.txt": "core"})
+    archive_sha = hashlib.sha256(archive_bytes).hexdigest()
+    updates = []
+
+    async def fake_update_run_status(run_id, status, started_at=None, finished_at=None, jobs=None):
+        updates.append({"status": status, "finished_at": finished_at, "jobs": jobs})
+
+    async def fake_resolve_dependencies(_deps, _token):
+        return {"resolved": {"lib-core": {"version": "1.0.0", "sha256": archive_sha}}}
+
+    async def fake_download_artifact(name, version, token):
+        assert name == "lib-core"
+        assert version == "1.0.0"
+        return archive_bytes
+
+    async def fake_notify(*_args, **_kwargs):
+        return None
+
+    class FakeRunner:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def run(self, spec):
+            dep_file = workspace_base / spec.run_id / "deps" / "lib-core" / "src" / "core.txt"
+            assert dep_file.exists()
+            assert dep_file.read_text(encoding="utf-8") == "core"
+            return SimpleNamespace(exit_code=0, duration_s=0.1, timed_out=False, oom_killed=False)
+
+    class FakeJobSpec:
+        def __init__(self, run_id, step_name, script, image, extra_env):
+            self.run_id = run_id
+            self.step_name = step_name
+            self.script = script
+            self.image = image
+            self.extra_env = extra_env
+
+    monkeypatch.setattr(engine_main, "update_run_status", fake_update_run_status)
+    monkeypatch.setattr(engine_main, "resolve_dependencies", fake_resolve_dependencies)
+    monkeypatch.setattr(engine_main, "download_artifact", fake_download_artifact)
+    monkeypatch.setattr(engine_main.slack, "notify_pipeline_started", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_pipeline_succeeded", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_pipeline_failed", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_resolution_failure", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_integrity_failure", fake_notify)
+    monkeypatch.setattr(engine_main, "_load_runner_types", lambda: (FakeRunner, FakeJobSpec))
+
+    asyncio.run(engine_main.execute_pipeline("run-deps", pipeline, "good-token"))
+
+    assert updates[-1]["status"] == "succeeded"
+    tmp_dir.cleanup()
+
+
+def test_execute_pipeline_marks_integrity_failure_on_checksum_mismatch(monkeypatch):
+    engine_main = importlib.import_module("engine.main")
+    tmp_dir = tempfile.TemporaryDirectory()
+    base = Path(tmp_dir.name)
+    db_path = base / "engine.db"
+    log_dir = base / "logs"
+    workspace_base = base / "workspaces"
+    monkeypatch.setattr(engine_main, "DB_PATH", db_path)
+    monkeypatch.setattr(engine_main, "LOG_DIR", log_dir)
+    monkeypatch.setattr(engine_main, "WORKSPACE_BASE", workspace_base)
+    asyncio.run(engine_main.init_db())
+    pipeline = parse_pipeline_text(
+        """
+name: demo
+version: 1.0.0
+dependencies:
+  - name: lib-core
+    version: ^1.0.0
+jobs:
+  build:
+    runtime: alpine:3.18
+    resources:
+      cpu: 1.0
+      memory: 128Mi
+    steps:
+      - name: build
+        run: echo hi
+"""
+    )
+
+    payload = b"corrupted"
+    actual_sha = hashlib.sha256(payload).hexdigest()
+    expected_sha = "0" * 64
+    updates = []
+    integrity_calls = []
+
+    async def fake_update_run_status(run_id, status, started_at=None, finished_at=None, jobs=None):
+        updates.append({"status": status, "finished_at": finished_at, "jobs": jobs})
+
+    async def fake_resolve_dependencies(_deps, _token):
+        return {"resolved": {"lib-core": {"version": "1.0.0", "sha256": expected_sha}}}
+
+    async def fake_download_artifact(name, version, token):
+        return payload
+
+    async def fake_notify(*_args, **_kwargs):
+        return None
+
+    async def fake_integrity_notify(artifact, expected, actual, run_id):
+        integrity_calls.append((artifact, expected, actual, run_id))
+
+    monkeypatch.setattr(engine_main, "update_run_status", fake_update_run_status)
+    monkeypatch.setattr(engine_main, "resolve_dependencies", fake_resolve_dependencies)
+    monkeypatch.setattr(engine_main, "download_artifact", fake_download_artifact)
+    monkeypatch.setattr(engine_main.slack, "notify_pipeline_started", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_pipeline_succeeded", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_pipeline_failed", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_resolution_failure", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_integrity_failure", fake_integrity_notify)
+    monkeypatch.setattr(engine_main, "_load_runner_types", lambda: (_raise_runner_should_not_init, object))
+
+    asyncio.run(engine_main.execute_pipeline("run-integrity", pipeline, "good-token"))
+
+    assert updates[-1]["status"] == "integrity_failure"
+    assert updates[-1]["finished_at"] is not None
+    assert integrity_calls == [("lib-core@1.0.0", expected_sha, actual_sha, "run-integrity")]
+    tmp_dir.cleanup()
+
+
 def test_get_run_returns_status_jobs_and_lockfile_url(monkeypatch):
     engine_main = importlib.import_module("engine.main")
 
@@ -399,3 +553,19 @@ async def _seed_run(engine_main, run_id, pipeline_name, status, lockfile, jobs):
             ),
         )
         await db.commit()
+
+
+def _make_tar_bytes(files: dict[str, str]) -> bytes:
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w:gz") as archive:
+        for path, content in files.items():
+            data = content.encode("utf-8")
+            info = tarfile.TarInfo(name=path)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return payload.getvalue()
+
+
+class _raise_runner_should_not_init:
+    def __init__(self, *args, **kwargs):
+        raise AssertionError("runner should not be initialized on integrity failure")

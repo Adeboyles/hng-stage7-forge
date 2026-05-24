@@ -276,7 +276,7 @@ class JobRunner:
                     container.remove(force=True)
                 except APIError:
                     pass
-            writer.close()
+            writer.close(write_eof=False)
 
     # -- helpers ----------------------------------------------------------
 
