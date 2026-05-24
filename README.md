@@ -39,7 +39,7 @@ print('Save this! It will never be shown again.')
 "
 
 # 6. Login with CLI
-pip install -e ./cli
+pip install -e .
 forge login http://YOUR_SERVER_IP
 # paste token when prompted
 ```
