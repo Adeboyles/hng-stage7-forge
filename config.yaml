@@ -8,12 +8,13 @@ engine:
 
 registry:
   host: "0.0.0.0"
+  internal_host: "registry"
   port: 8001
   storage_path: /data/artifacts
   db_path: /data/registry.db
 
 slack:
-  webhook_url: ""
+  webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
   enabled: false
 
 auth:

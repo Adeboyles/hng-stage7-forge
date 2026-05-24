@@ -111,6 +111,9 @@ jobs:
         return None
 
     class FakeRunner:
+        def __init__(self, *args, **kwargs):
+            pass
+
         def run(self, spec):
             assert spec.image == "alpine:3.18"
             assert "echo hi" in spec.script
@@ -137,6 +140,75 @@ jobs:
     assert updates[0]["status"] == "running"
     assert updates[-1]["status"] == "succeeded"
     assert updates[-1]["jobs"]["build"]["status"] == "succeeded"
+    tmp_dir.cleanup()
+
+
+def test_execute_pipeline_marks_run_failed_when_runner_init_crashes(monkeypatch):
+    engine_main = importlib.import_module("engine.main")
+    tmp_dir = tempfile.TemporaryDirectory()
+    db_path = Path(tmp_dir.name) / "engine.db"
+    monkeypatch.setattr(engine_main, "DB_PATH", db_path)
+    asyncio.run(engine_main.init_db())
+    pipeline = parse_pipeline_text(
+        """
+name: demo
+version: 1.0.0
+jobs:
+  build:
+    runtime: alpine:3.18
+    resources:
+      cpu: 1.0
+      memory: 128Mi
+    steps:
+      - name: build
+        run: echo hi
+"""
+    )
+
+    updates = []
+
+    async def fake_update_run_status(run_id, status, started_at=None, finished_at=None, jobs=None):
+        updates.append(
+            {
+                "run_id": run_id,
+                "status": status,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "jobs": jobs,
+            }
+        )
+
+    async def fake_resolve_dependencies(_deps, _token):
+        return {}
+
+    async def fake_notify(*_args, **_kwargs):
+        return None
+
+    class BrokenRunner:
+        def __init__(self, *args, **kwargs):
+            raise NameError("FORGE_NETWORK is not defined")
+
+    class FakeJobSpec:
+        def __init__(self, run_id, step_name, script, image, extra_env):
+            self.run_id = run_id
+            self.step_name = step_name
+            self.script = script
+            self.image = image
+            self.extra_env = extra_env
+
+    monkeypatch.setattr(engine_main, "update_run_status", fake_update_run_status)
+    monkeypatch.setattr(engine_main, "resolve_dependencies", fake_resolve_dependencies)
+    monkeypatch.setattr(engine_main.slack, "notify_pipeline_started", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_pipeline_succeeded", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_pipeline_failed", fake_notify)
+    monkeypatch.setattr(engine_main.slack, "notify_resolution_failure", fake_notify)
+    monkeypatch.setattr(engine_main, "_load_runner_types", lambda: (BrokenRunner, FakeJobSpec))
+
+    asyncio.run(engine_main.execute_pipeline("run-broken", pipeline, "good-token"))
+
+    assert updates[0]["status"] == "running"
+    assert updates[-1]["status"] == "failed"
+    assert updates[-1]["finished_at"] is not None
     tmp_dir.cleanup()
 
 

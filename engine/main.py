@@ -11,11 +11,13 @@ from fastapi import FastAPI, UploadFile, File, Header, HTTPException
 from fastapi.responses import StreamingResponse
 
 try:
+    from .config import engine_settings, registry_internal_base_url
     from .parser import parse_pipeline_text as parse_pipeline, PipelineValidationError
     from .scheduler import DAGScheduler, SchedulerError
     from .logs import tail_log
     from . import slack
 except ImportError:  # pragma: no cover - supports running as `uvicorn main:app` from /app
+    from config import engine_settings, registry_internal_base_url
     from parser import parse_pipeline_text as parse_pipeline, PipelineValidationError
     from scheduler import DAGScheduler, SchedulerError
     from logs import tail_log
@@ -29,13 +31,14 @@ async def lifespan(_app: FastAPI):
     yield
 
 
+ENGINE_CONFIG = engine_settings()
 app = FastAPI(title="Forge CI Engine", lifespan=lifespan)
 
 # ── DB ───────────────────────────────────────────────
 
 DB_PATH = Path("/tmp/engine.db")
-LOG_DIR = Path("/var/forge/logs")
-DEFAULT_CONCURRENCY_LIMIT = 4
+LOG_DIR = Path(ENGINE_CONFIG.get("log_base", "/var/forge/logs"))
+DEFAULT_CONCURRENCY_LIMIT = int(ENGINE_CONFIG.get("max_concurrency", 4))
 
 
 async def init_db():
@@ -65,7 +68,7 @@ async def verify_token(authorization: Optional[str]) -> str:
     import httpx
     async with httpx.AsyncClient() as client:
         resp = await client.get(
-            "http://registry:8001/auth/verify",
+            f"{registry_internal_base_url()}/auth/verify",
             headers={"Authorization": f"Bearer {token}"},
             timeout=5.0
         )
@@ -195,8 +198,15 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
         await slack.notify_resolution_failure(pipeline_name, run_id, str(e))
         return
 
-    JobRunner, JobSpec = _load_runner_types()
-    runner = JobRunner()
+    try:
+        JobRunner, JobSpec = _load_runner_types()
+        runner = JobRunner(log_dir=str(LOG_DIR))
+    except Exception as e:
+        finished_at = datetime.now(timezone.utc).isoformat()
+        await update_run_status(run_id, "failed", finished_at=finished_at, jobs={})
+        await slack.notify_pipeline_failed(pipeline_name, run_id, "0s", "runner_init")
+        await slack.notify_resolution_failure(pipeline_name, run_id, str(e))
+        return
     failing_job = None
 
     def executor(job_name, job_def):
@@ -313,7 +323,7 @@ async def resolve_dependencies(deps, token):
 
     async with httpx.AsyncClient() as client:
         resp = await client.post(
-            "http://registry:8001/resolve",
+            f"{registry_internal_base_url()}/resolve",
             json={"dependencies": [d.__dict__ for d in deps]},
             headers={"Authorization": f"Bearer {token}"}
         )

@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shlex
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -31,7 +30,12 @@ import docker
 from docker.errors import APIError, ContainerError, ImageNotFound, NotFound
 from docker.models.containers import Container
 
-from logs import LogWriter
+try:
+    from .config import engine_settings, isolation_settings, registry_internal_base_url
+    from .logs import LogWriter
+except ImportError:  # pragma: no cover - supports running as `python runner.py` from /app
+    from config import engine_settings, isolation_settings, registry_internal_base_url
+    from logs import LogWriter
 
 log = logging.getLogger(__name__)
 
@@ -40,15 +44,8 @@ log = logging.getLogger(__name__)
 # Constants. Centralised so the security review has one place to read.
 # ---------------------------------------------------------------------------
 
-#FORGE_NETWORK = "forge-internal"
-#REGISTRY_HOST = "registry"
-#REGISTRY_PORT = 8001
-
 # Resource limits.
 CPU_PERIOD = 100_000
-CPU_QUOTA = 100_000          # 1.0 CPU (quota / period)
-MEM_LIMIT = "512m"
-MEM_SWAP_LIMIT = "512m"      # equal to mem_limit -> no swap
 PID_LIMIT = 100
 
 # Default image. The platform pins to a digest in production.
@@ -103,11 +100,19 @@ class JobRunner:
     def __init__(
         self,
         docker_client: Optional[docker.DockerClient] = None,
-        log_dir: str = "/var/forge/logs",
+        log_dir: Optional[str] = None,
         token_provider: Optional[Callable[[str], str]] = None,
     ):
+        engine_config = engine_settings()
+        isolation_config = isolation_settings()
         self.client = docker_client or docker.from_env()
-        self.log_dir = log_dir
+        self.log_dir = log_dir or engine_config.get("log_base", "/var/forge/logs")
+        self.network_name = isolation_config.get("network_name", "forge-internal")
+        self.registry_url = registry_internal_base_url()
+        default_cpu = float(isolation_config.get("default_cpu", 1.0))
+        self.cpu_quota = max(1, int(default_cpu * CPU_PERIOD))
+        self.mem_limit = str(isolation_config.get("default_memory", "512m"))
+        self.memswap_limit = self.mem_limit
         # token_provider lets tests inject deterministic tokens. In prod the
         # scheduler mints a short-lived token bound to (run_id, step_name).
         self._token_provider = token_provider or (lambda _run_id: uuid.uuid4().hex)
@@ -119,14 +124,14 @@ class JobRunner:
     def _ensure_network(self) -> None:
         """Create forge-internal if it does not already exist."""
         try:
-            self.client.networks.get(FORGE_NETWORK)
+            self.client.networks.get(self.network_name)
             return
         except NotFound:
             pass
 
-        log.info("creating docker network %s (internal)", FORGE_NETWORK)
+        log.info("creating docker network %s (internal)", self.network_name)
         self.client.networks.create(
-            name=FORGE_NETWORK,
+            name=self.network_name,
             driver="bridge",
             internal=True,        # <- no external internet
             check_duplicate=True,
@@ -150,7 +155,7 @@ class JobRunner:
         """
         env = {
             "FORGE_TOKEN": self._token_provider(spec.run_id),
-            "FORGE_URL": f"http://{REGISTRY_HOST}:{REGISTRY_PORT}",
+            "FORGE_URL": self.registry_url,
             "FORGE_RUN_ID": spec.run_id,
             "FORGE_STEP": spec.step_name,
             # PATH is set explicitly so the container doesn't inherit /host paths.
@@ -168,7 +173,9 @@ class JobRunner:
         writer = LogWriter(log_path, job=spec.step_name)
 
         writer.write(f"--- starting step {spec.step_name} ---")
-        writer.write(f"image={spec.image} cpu=1.0 mem={MEM_LIMIT} timeout={spec.timeout_s}s")
+        writer.write(
+            f"image={spec.image} cpu={self.cpu_quota / CPU_PERIOD:.1f} mem={self.mem_limit} timeout={spec.timeout_s}s"
+        )
 
         # We invoke sh -c <script>. The script is passed as a single argv
         # element (not interpolated into a shell string), so the only thing
@@ -185,7 +192,7 @@ class JobRunner:
                 command=cmd,
                 detach=True,
                 remove=False,                    # we remove manually after reading state
-                network=FORGE_NETWORK,
+                network=self.network_name,
                 environment=self._build_env(spec),
 
                 # --- isolation ---
@@ -201,9 +208,9 @@ class JobRunner:
 
                 # --- resources ---
                 cpu_period=CPU_PERIOD,
-                cpu_quota=CPU_QUOTA,
-                mem_limit=MEM_LIMIT,
-                memswap_limit=MEM_SWAP_LIMIT,
+                cpu_quota=self.cpu_quota,
+                mem_limit=self.mem_limit,
+                memswap_limit=self.memswap_limit,
                 pids_limit=PID_LIMIT,
                 oom_kill_disable=False,          # we WANT the kernel to OOM-kill
 
@@ -234,7 +241,7 @@ class JobRunner:
             oom_killed = self._was_oom_killed(container, exit_code)
 
             if oom_killed:
-                writer.write(f"Job killed: memory limit exceeded ({MEM_LIMIT})")
+                writer.write(f"Job killed: memory limit exceeded ({self.mem_limit})")
             elif not timed_out:
                 writer.write(f"--- step {spec.step_name} exited with code {exit_code} ---")
 
