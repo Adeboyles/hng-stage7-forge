@@ -16,8 +16,8 @@ jobs:
     steps:
       - name: check-deps
         run: |
-          ls /deps/lib-core/ && echo 'lib-core available'
-          ls /deps/lib-http/ && echo 'lib-http available'
+          ls deps/lib-core/ && echo 'lib-core available'
+          ls deps/lib-http/ && echo 'lib-http available'
       - name: create-source
         run: "mkdir -p src && echo 'service-api source' > src/index.sh"
       - name: package
