@@ -58,6 +58,7 @@ class PipelineDefinition:
     version: str
     dependencies: tuple[DependencySpec, ...]
     jobs: dict[str, JobDefinition]
+    artifacts: tuple[ArtifactDefinition, ...] = ()
 
 
 # ─────────────────────────────
@@ -84,6 +85,7 @@ def parse_pipeline_text(text: str) -> PipelineDefinition:
         raise PipelineValidationError("empty pipeline", 1, 1, "$")
 
     root_map = _require_mapping(root, "$")
+    _validate_allowed_fields(root_map, {"name", "version", "dependencies", "jobs", "artifacts"}, "$")
     data = _mapping_to_dict(root_map, "$")
 
     name = _require_str(data, "name", "$")
@@ -91,12 +93,14 @@ def parse_pipeline_text(text: str) -> PipelineDefinition:
 
     dependencies = _parse_dependencies(data.get("dependencies"), "dependencies")
     jobs = _parse_jobs(data)
+    artifacts = _parse_artifacts(data.get("artifacts"), "artifacts")
 
     return PipelineDefinition(
         name=name,
         version=version,
         dependencies=dependencies,
         jobs=jobs,
+        artifacts=artifacts,
     )
 
 
@@ -110,11 +114,14 @@ def _parse_dependencies(node: Node | None, path: str):
 
     items = []
     for i, item in enumerate(_require_sequence(node, path).value):
-        mp = _mapping_to_dict(_require_mapping(item, f"{path}[{i}]"), path)
+        item_path = f"{path}[{i}]"
+        mapping = _require_mapping(item, item_path)
+        _validate_allowed_fields(mapping, {"name", "version"}, item_path)
+        mp = _mapping_to_dict(mapping, item_path)
         items.append(
             DependencySpec(
-                name=_require_str(mp, "name", path),
-                version=_require_str(mp, "version", path),
+                name=_require_str(mp, "name", item_path),
+                version=_require_str(mp, "version", item_path),
             )
         )
     return tuple(items)
@@ -131,15 +138,17 @@ def _parse_jobs(root: dict[str, Node]) -> dict[str, JobDefinition]:
     jobs = {}
 
     for key_node, value_node in jobs_map.value:
-        job_name = _require_scalar(key_node)
+        job_name = _require_scalar(key_node, "jobs")
         job_path = f"jobs.{job_name}"
 
-        fields = _mapping_to_dict(_require_mapping(value_node, job_path), job_path)
+        mapping = _require_mapping(value_node, job_path)
+        _validate_allowed_fields(mapping, {"runtime", "resources", "steps", "needs"}, job_path)
+        fields = _mapping_to_dict(mapping, job_path)
 
         runtime = _require_str(fields, "runtime", job_path)
-        resources = _parse_resources(_require_field(fields, "resources", job_path), job_path)
-        steps = _parse_steps(_require_field(fields, "steps", job_path), job_path)
-        needs = _parse_needs(fields.get("needs"), job_path)
+        resources = _parse_resources(_require_field(fields, "resources", job_path), f"{job_path}.resources")
+        steps = _parse_steps(_require_field(fields, "steps", job_path), f"{job_path}.steps")
+        needs = _parse_needs(fields.get("needs"), f"{job_path}.needs")
 
         jobs[job_name] = JobDefinition(
             name=job_name,
@@ -152,25 +161,61 @@ def _parse_jobs(root: dict[str, Node]) -> dict[str, JobDefinition]:
     return jobs
 
 
+def _parse_artifacts(node: Node | None, path: str):
+    if node is None:
+        return ()
+
+    artifacts = []
+    seen = set()
+
+    for i, item in enumerate(_require_sequence(node, path).value):
+        item_path = f"{path}[{i}]"
+        mapping = _require_mapping(item, item_path)
+        _validate_allowed_fields(mapping, {"name", "version", "path"}, item_path)
+        mp = _mapping_to_dict(mapping, item_path)
+        name = _require_str(mp, "name", item_path)
+        version = _require_str(mp, "version", item_path)
+        artifact_path = _require_str(mp, "path", item_path)
+        coordinate = (name, version)
+        if coordinate in seen:
+            raise PipelineValidationError(
+                f"duplicate artifact coordinate '{name}@{version}'",
+                *_line_col(item),
+                item_path,
+            )
+        seen.add(coordinate)
+        artifacts.append(ArtifactDefinition(name=name, version=version, path=artifact_path))
+
+    return tuple(artifacts)
+
+
 # ─────────────────────────────
 # Resources / Steps / Needs
 # ─────────────────────────────
 
 def _parse_resources(node: Node, path: str):
-    mp = _mapping_to_dict(_require_mapping(node, path), path)
-    cpu = float(_require_scalar(mp["cpu"], f"{path}.cpu"))
-    memory = _require_scalar(mp["memory"], f"{path}.memory")
+    mapping = _require_mapping(node, path)
+    _validate_allowed_fields(mapping, {"cpu", "memory"}, path)
+    mp = _mapping_to_dict(mapping, path)
+    cpu = float(_require_scalar(_require_field(mp, "cpu", path), f"{path}.cpu"))
+    memory = _require_scalar(
+        _require_field(mp, "memory", path),
+        f"{path}.memory",
+    )
     return ResourceLimits(cpu=cpu, memory=memory)
 
 
 def _parse_steps(node: Node, path: str):
     steps = []
     for i, step in enumerate(_require_sequence(node, path).value):
-        mp = _mapping_to_dict(_require_mapping(step, f"{path}[{i}]"), path)
+        step_path = f"{path}[{i}]"
+        mapping = _require_mapping(step, step_path)
+        _validate_allowed_fields(mapping, {"name", "run"}, step_path)
+        mp = _mapping_to_dict(mapping, step_path)
         steps.append(
             StepDefinition(
-                name=_require_str(mp, "name", path),
-                run=_require_str(mp, "run", path),
+                name=_require_str(mp, "name", step_path),
+                run=_require_str(mp, "run", step_path),
             )
         )
     return tuple(steps)
@@ -192,19 +237,19 @@ def _parse_needs(node: Node | None, path: str):
 
 def _require_mapping(node: Node, path: str) -> MappingNode:
     if not isinstance(node, MappingNode):
-        raise PipelineValidationError("expected mapping", 1, 1, path)
+        raise PipelineValidationError("expected mapping", *_line_col(node), path)
     return node
 
 
 def _require_sequence(node: Node, path: str) -> SequenceNode:
     if not isinstance(node, SequenceNode):
-        raise PipelineValidationError("expected sequence", 1, 1, path)
+        raise PipelineValidationError("expected sequence", *_line_col(node), path)
     return node
 
 
 def _require_scalar(node: Node, path: str) -> str:
     if not isinstance(node, ScalarNode):
-        raise PipelineValidationError("expected scalar", 1, 1, path)
+        raise PipelineValidationError("expected scalar", *_line_col(node), path)
     return node.value
 
 
@@ -215,6 +260,17 @@ def _mapping_to_dict(node: MappingNode, path: str) -> dict[str, Node]:
     return out
 
 
+def _validate_allowed_fields(node: MappingNode, allowed: set[str], path: str) -> None:
+    for key_node, _ in node.value:
+        key = _require_scalar(key_node, path)
+        if key not in allowed:
+            raise PipelineValidationError(
+                f"unknown field '{key}'",
+                *_line_col(key_node),
+                path,
+            )
+
+
 def _require_field(data: dict, key: str, path: str) -> Node:
     if key not in data:
         raise PipelineValidationError(f"missing field '{key}'", 1, 1, f"{path}.{key}")
@@ -222,7 +278,14 @@ def _require_field(data: dict, key: str, path: str) -> Node:
 
 
 def _require_str(data: dict, key: str, path: str) -> str:
-    return _require_scalar(_require_field(data, key, path), path)
+    return _require_scalar(_require_field(data, key, path), f"{path}.{key}")
+
+
+def _line_col(node: Node) -> tuple[int, int]:
+    mark = getattr(node, "start_mark", None)
+    if mark is None:
+        return 1, 1
+    return mark.line + 1, mark.column + 1
 
 
 # ─────────────────────────────
@@ -235,3 +298,6 @@ class PipelineValidationError(ValueError):
     line: int
     column: int
     path: str
+
+    def __str__(self) -> str:
+        return f"{self.message} at {self.path} ({self.line}:{self.column})"

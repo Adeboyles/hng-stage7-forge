@@ -82,17 +82,33 @@ class LogWriter:
         # fsync per line (would crush IOPS); we rely on the page cache,
         # which readers on the same host see immediately.
 
-    def close(self) -> None:
+    def close(self, *, write_eof: bool = False) -> None:
         if self._closed:
             return
         try:
-            eof = {"ts": _now_iso(), "job": self.job, "eof": True}
-            self._fh.write((json.dumps(eof) + "\n").encode("utf-8"))
-            self._fh.flush()
-            os.fsync(self._fh.fileno())
+            if write_eof:
+                eof = {"ts": _now_iso(), "job": self.job, "eof": True}
+                self._fh.write((json.dumps(eof) + "\n").encode("utf-8"))
+                self._fh.flush()
+                os.fsync(self._fh.fileno())
         finally:
             self._fh.close()
             self._closed = True
+
+
+def append_log_line(path: str, job: str, line: str) -> None:
+    """Append one NDJSON log line without closing the run stream."""
+    writer = LogWriter(path, job)
+    try:
+        writer.write(line)
+    finally:
+        writer.close(write_eof=False)
+
+
+def append_eof(path: str, job: str = "system") -> None:
+    """Append the single run-level EOF sentinel."""
+    writer = LogWriter(path, job)
+    writer.close(write_eof=True)
 
 
 def _now_iso() -> str:
