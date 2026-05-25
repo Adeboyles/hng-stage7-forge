@@ -13,10 +13,6 @@ registry:
   storage_path: /data/artifacts
   db_path: /data/registry.db
 
-slack:
-  webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
-  enabled: false
-
 auth:
   hash_algorithm: bcrypt
   token_length: 32
