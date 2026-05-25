@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadF
 from fastapi.responses import Response
 
 try:
-    from .auth import get_db, require_auth, verify_token
+    from .auth import get_db, load_config, require_auth, verify_token
     from .metadata import (
         ArtifactMetadataStore as MetadataStore,
         ArtifactNotFoundError,
@@ -33,7 +33,7 @@ try:
 except (
     ImportError
 ):  # pragma: no cover - supports running as `uvicorn main:app` from /app
-    from auth import get_db, require_auth, verify_token
+    from auth import get_db, load_config, require_auth, verify_token
     from metadata import (
         ArtifactMetadataStore as MetadataStore,
         ArtifactNotFoundError,
@@ -55,8 +55,9 @@ except (
         InvalidDigestError,
     )
 
-DB_PATH = Path("/tmp/artifacts/registry.db")
-STORAGE_PATH = Path("/tmp/artifacts/blobs")
+REGISTRY_CONFIG = load_config().get("registry", {})
+DB_PATH = Path(REGISTRY_CONFIG.get("db_path", "/data/registry.db"))
+STORAGE_PATH = Path(REGISTRY_CONFIG.get("storage_path", "/data/artifacts"))
 
 storage = ArtifactStorage(STORAGE_PATH)
 

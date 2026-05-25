@@ -1,4 +1,5 @@
 import hashlib
+import importlib
 import tempfile
 from pathlib import Path
 
@@ -120,3 +121,23 @@ def test_resolve_returns_lockfile_dict(monkeypatch):
         assert response.status_code == 200
         body = response.json()
         assert body["resolved"]["lib-core"]["version"] == "1.0.0"
+
+
+def test_registry_main_uses_configured_storage_and_db_paths(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    db_path = tmp_path / "data" / "registry.db"
+    storage_path = tmp_path / "data" / "blobs"
+    config_path.write_text(
+        (
+            "registry:\n"
+            f"  db_path: {db_path.as_posix()}\n"
+            f"  storage_path: {storage_path.as_posix()}\n"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FORGE_CONFIG", str(config_path))
+
+    reloaded = importlib.reload(registry_main)
+
+    assert reloaded.DB_PATH == db_path
+    assert reloaded.STORAGE_PATH == storage_path

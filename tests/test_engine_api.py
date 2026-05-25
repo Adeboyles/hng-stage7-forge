@@ -95,6 +95,7 @@ jobs:
     )
 
     updates = []
+    runner_init = {}
 
     async def fake_update_run_status(run_id, status, started_at=None, finished_at=None, jobs=None):
         updates.append(
@@ -115,20 +116,24 @@ jobs:
 
     class FakeRunner:
         def __init__(self, *args, **kwargs):
-            pass
+            runner_init.update(kwargs)
 
         def run(self, spec):
             assert spec.image == "alpine:3.18"
             assert "echo hi" in spec.script
+            assert spec.cpu_limit == 1.0
+            assert spec.memory_limit == "128Mi"
             return SimpleNamespace(exit_code=0, duration_s=0.1, timed_out=False, oom_killed=False)
 
     class FakeJobSpec:
-        def __init__(self, run_id, step_name, script, image, extra_env):
+        def __init__(self, run_id, step_name, script, image, extra_env, cpu_limit=None, memory_limit=None):
             self.run_id = run_id
             self.step_name = step_name
             self.script = script
             self.image = image
             self.extra_env = extra_env
+            self.cpu_limit = cpu_limit
+            self.memory_limit = memory_limit
 
     monkeypatch.setattr(engine_main, "update_run_status", fake_update_run_status)
     monkeypatch.setattr(engine_main, "resolve_dependencies", fake_resolve_dependencies)
@@ -143,6 +148,7 @@ jobs:
     assert updates[0]["status"] == "running"
     assert updates[-1]["status"] == "succeeded"
     assert updates[-1]["jobs"]["build"]["status"] == "succeeded"
+    assert runner_init["token_provider"]("run-1") == "good-token"
     tmp_dir.cleanup()
 
 
@@ -192,12 +198,14 @@ jobs:
             raise NameError("FORGE_NETWORK is not defined")
 
     class FakeJobSpec:
-        def __init__(self, run_id, step_name, script, image, extra_env):
+        def __init__(self, run_id, step_name, script, image, extra_env, cpu_limit=None, memory_limit=None):
             self.run_id = run_id
             self.step_name = step_name
             self.script = script
             self.image = image
             self.extra_env = extra_env
+            self.cpu_limit = cpu_limit
+            self.memory_limit = memory_limit
 
     monkeypatch.setattr(engine_main, "update_run_status", fake_update_run_status)
     monkeypatch.setattr(engine_main, "resolve_dependencies", fake_resolve_dependencies)
@@ -274,12 +282,14 @@ jobs:
             return SimpleNamespace(exit_code=0, duration_s=0.1, timed_out=False, oom_killed=False)
 
     class FakeJobSpec:
-        def __init__(self, run_id, step_name, script, image, extra_env):
+        def __init__(self, run_id, step_name, script, image, extra_env, cpu_limit=None, memory_limit=None):
             self.run_id = run_id
             self.step_name = step_name
             self.script = script
             self.image = image
             self.extra_env = extra_env
+            self.cpu_limit = cpu_limit
+            self.memory_limit = memory_limit
 
     monkeypatch.setattr(engine_main, "update_run_status", fake_update_run_status)
     monkeypatch.setattr(engine_main, "resolve_dependencies", fake_resolve_dependencies)
@@ -407,6 +417,7 @@ artifacts:
         return {}
 
     async def fake_publish_artifact(path, name, version, token, **kwargs):
+        assert not any(update["status"] == "succeeded" for update in updates)
         published.append((path, name, version, token, kwargs.get("deps")))
 
     async def fake_notify(*_args, **_kwargs):
@@ -423,12 +434,14 @@ artifacts:
             return SimpleNamespace(exit_code=0, duration_s=0.1, timed_out=False, oom_killed=False)
 
     class FakeJobSpec:
-        def __init__(self, run_id, step_name, script, image, extra_env):
+        def __init__(self, run_id, step_name, script, image, extra_env, cpu_limit=None, memory_limit=None):
             self.run_id = run_id
             self.step_name = step_name
             self.script = script
             self.image = image
             self.extra_env = extra_env
+            self.cpu_limit = cpu_limit
+            self.memory_limit = memory_limit
 
     monkeypatch.setattr(engine_main, "update_run_status", fake_update_run_status)
     monkeypatch.setattr(engine_main, "resolve_dependencies", fake_resolve_dependencies)
@@ -442,6 +455,7 @@ artifacts:
 
     asyncio.run(engine_main.execute_pipeline("run-publish", pipeline, "good-token"))
 
+    assert [update["status"] for update in updates] == ["running", "succeeded"]
     assert updates[-1]["status"] == "succeeded"
     assert published == [
         (

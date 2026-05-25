@@ -223,7 +223,10 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
 
     try:
         JobRunner, JobSpec = _load_runner_types()
-        runner = JobRunner(log_dir=str(LOG_DIR))
+        runner = JobRunner(
+            log_dir=str(LOG_DIR),
+            token_provider=lambda _run_id: token,
+        )
     except Exception as e:
         finished_at = datetime.now(timezone.utc).isoformat()
         _log_system(run_id, f"runner initialization failed: {e}")
@@ -240,6 +243,8 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
             step_name=job_name,
             script=job_def.to_shell_script(),
             image=job_def.runtime,
+            cpu_limit=job_def.resources.cpu,
+            memory_limit=job_def.resources.memory,
             extra_env={},
         )
         return runner.run(spec)
@@ -277,21 +282,6 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
     # -----------------------------
     # Finalize
     # -----------------------------
-    finished_at = datetime.now(timezone.utc).isoformat()
-
-    await update_run_status(
-        run_id,
-        final_status,
-        finished_at=finished_at,
-        jobs=job_results
-    )
-    _finish_run_log(run_id)
-
-    duration = (
-        datetime.fromisoformat(finished_at) -
-        datetime.fromisoformat(started_at)
-    ).seconds
-
     if final_status == "succeeded":
         try:
             await publish_pipeline_artifacts(
@@ -301,6 +291,11 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
             )
         except Exception as e:
             final_status = "failed"
+            finished_at = datetime.now(timezone.utc).isoformat()
+            duration = (
+                datetime.fromisoformat(finished_at) -
+                datetime.fromisoformat(started_at)
+            ).seconds
             await update_run_status(
                 run_id,
                 final_status,
@@ -313,8 +308,32 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
                 pipeline_name, run_id, f"{duration}s", "artifact_publish"
             )
             return
+        finished_at = datetime.now(timezone.utc).isoformat()
+        duration = (
+            datetime.fromisoformat(finished_at) -
+            datetime.fromisoformat(started_at)
+        ).seconds
+        await update_run_status(
+            run_id,
+            final_status,
+            finished_at=finished_at,
+            jobs=job_results,
+        )
+        _finish_run_log(run_id)
         await slack.notify_pipeline_succeeded(pipeline_name, run_id, f"{duration}s")
     else:
+        finished_at = datetime.now(timezone.utc).isoformat()
+        duration = (
+            datetime.fromisoformat(finished_at) -
+            datetime.fromisoformat(started_at)
+        ).seconds
+        await update_run_status(
+            run_id,
+            final_status,
+            finished_at=finished_at,
+            jobs=job_results,
+        )
+        _finish_run_log(run_id)
         await slack.notify_pipeline_failed(
             pipeline_name, run_id, f"{duration}s", failing_job or "unknown"
         )
