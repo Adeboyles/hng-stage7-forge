@@ -21,12 +21,6 @@ The current codebase implements:
 - host-side token creation, listing, and revocation with hashed storage
 - per-run internal job networks with registry-only reachable egress
 
-Implementation docs:
-
-- [Rubric Components](./docs/rubric-components.md)
-- [Parser](./docs/parser.md)
-- [Scheduler](./docs/scheduler.md)
-
 ## Fresh VPS Setup
 
 ```bash
@@ -297,5 +291,3 @@ Observed result during the latest update:
 
 - `58 passed`
 
-This README intentionally does not claim the full grading checklist is complete
-until final end-to-end verification is done.
