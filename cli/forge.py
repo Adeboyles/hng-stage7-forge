@@ -53,6 +53,33 @@ def get_url(path: str) -> str:
     return f"{config['url']}{path}"
 
 
+def _response_error_message(resp: httpx.Response, fallback: str) -> str:
+    """
+    Return a short, user-friendly error message for an HTTP response.
+
+    Prefer FastAPI-style JSON `detail` payloads when present. If the server
+    returns HTML or another non-JSON body, avoid printing raw markup and
+    fall back to a concise status-based message instead.
+    """
+    try:
+        payload = resp.json()
+    except ValueError:
+        content_type = resp.headers.get("content-type", "").lower()
+        if "text/plain" in content_type:
+            text = resp.text.strip()
+            if text:
+                return text
+        return f"{fallback} (HTTP {resp.status_code}, non-JSON response from server)"
+
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        if isinstance(detail, str) and detail.strip():
+            return detail
+        if detail is not None:
+            return json.dumps(detail)
+    return fallback
+
+
 # ── Commands ───────────────────────────────────────────────────────
 
 def cmd_login(args):
@@ -71,7 +98,8 @@ def cmd_login(args):
             timeout=10.0
         )
         if resp.status_code != 200:
-            print(f"Login failed: {resp.json().get('detail', 'Invalid token')}")
+            message = _response_error_message(resp, "Invalid token")
+            print(f"Login failed: {message}")
             sys.exit(1)
     except httpx.RequestError as e:
         print(f"Cannot connect to {url}: {e}")
@@ -241,7 +269,7 @@ def cmd_resolve(args):
         lockfile = resp.json()
         print(json.dumps(lockfile, indent=2))
     else:
-        print(f"Resolution failed: {resp.json().get('detail', resp.text)}")
+        print(f"Resolution failed: {_response_error_message(resp, 'Resolution failed')}")
         sys.exit(1)
 
 
