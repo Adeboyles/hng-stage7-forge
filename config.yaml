@@ -6,6 +6,9 @@ engine:
   workspace_base: /data/workspaces
   log_base: /data/logs
 
+slack:
+  webhook_url: ""
+
 registry:
   host: "0.0.0.0"
   internal_host: "registry"
