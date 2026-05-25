@@ -13,12 +13,13 @@ jobs:
       memory: 256Mi
     steps:
       - name: check-deps
-        run: "ls /deps/lib-core/ && echo 'lib-core available'"
+        run: "ls deps/lib-core/ && echo 'lib-core available'"
       - name: create-source
         run: "mkdir -p src && echo 'lib-http source' > src/index.sh"
       - name: package
         run: "tar czf out.tar.gz src/"
-    artifacts:
-      - name: lib-http
-        version: 1.0.0
-        path: ./out.tar.gz
+        
+artifacts:
+  - name: lib-http
+    version: 1.0.0
+    path: ./out.tar.gz

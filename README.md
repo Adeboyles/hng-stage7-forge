@@ -1,52 +1,65 @@
-	# Forge — CI/CD Platform with Integrated Artifact Registry
+# Forge — CI/CD Platform with Integrated Artifact Registry
 
-A self-hosted CI/CD platform with an integrated artifact registry.
-Two cooperating subsystems with one HTTP API.
+Forge is a self-hosted CI/CD platform with an integrated artifact registry.
+It has two cooperating subsystems behind one HTTP surface:
 
-**Public URL:** http://YOUR_SERVER_IP
+- a CI engine that parses YAML pipelines, resolves dependencies, runs jobs in isolated containers, streams logs over SSE, and reports run status
+- an artifact registry and dependency resolver that stores immutable artifacts, verifies checksums, and produces deterministic lockfiles
 
----
+**Public URL:** `http://YOUR_SERVER_IP`
 
-## Quick Start
+## Status
 
-### Fresh VPS Setup
+The current codebase implements:
+
+- registry HTTP/core alignment
+- strict pipeline parsing and DAG scheduling
+- run status, lockfile, and SSE log endpoints
+- shared per-run workspaces
+- dependency pull into `./deps/<name>/` with pull-time SHA-256 verification
+- automatic artifact publishing after successful runs
+- host-side token creation, listing, and revocation with hashed storage
+- per-run internal job networks with registry-only reachable egress
+
+## Fresh VPS Setup
 
 ```bash
-# 1. Install Docker
+# 1. Install Docker and Git
 sudo apt update -y
-sudo apt install -y docker.io docker-compose-plugin git
+sudo apt install -y docker.io docker-compose-plugin git python3 python3-pip
 sudo systemctl enable docker
 sudo systemctl start docker
-sudo usermod -aG docker ubuntu
+sudo usermod -aG docker "$USER"
 newgrp docker
 
-# 2. Clone repo
+# 2. Clone the repo
 git clone https://github.com/YOUR_ORG/forge-platform.git
 cd forge-platform
 
-# 3. Create data directories
+# 3. Create persistent data directories
 mkdir -p data/logs data/workspaces data/artifacts
 
-# 4. Start the platform
+# 4. Install the host CLIs
+python3 -m pip install -e .
+
+# 5. Start the platform
 docker compose up -d
 
-# 5. Create first auth token
-docker compose exec registry python3 -c "
-from auth import create_token
-token = create_token('admin')
-print(f'Token: {token}')
-print('Save this! It will never be shown again.')
-"
+# 6. Create the first auth token on the host
+forge-token create admin
 
-# 6. Login with CLI
-pip install -e ./cli
+# 7. Login with the user CLI
 forge login http://YOUR_SERVER_IP
-# paste token when prompted
+# paste the token printed by forge-token create
 ```
 
----
+Environment variables should only handle environment-specific concerns such as
+locating the config file. Platform settings such as ports, workspace paths,
+network names, and registry endpoints belong in `config.yaml`.
 
 ## Pipeline YAML Schema
+
+Annotated example:
 
 ```yaml
 # Required: pipeline name
@@ -55,209 +68,226 @@ name: build-lib-http
 # Required: pipeline version
 version: 1.0.0
 
-# Optional: dependencies pulled before any job runs
+# Optional: dependency constraints resolved before any build job runs
 dependencies:
-  - name: lib-core          # package name in registry
-    version: "^1.0.0"       # semver constraint
+  - name: lib-core
+    version: "^1.0.0"
 
 # Required: jobs map
 jobs:
-
-  # Job name (used in needs: references)
   build:
-
-    # Required: Docker image for this job
+    # Required: container image
     runtime: alpine:3.18
 
-    # Optional: resource limits (defaults shown)
+    # Required: per-job resource limits
     resources:
-      cpu: 1.0              # CPU cores (float)
-      memory: 512Mi         # memory limit
+      cpu: 1.0
+      memory: 512Mi
 
-    # Optional: wait for other jobs first
+    # Optional: DAG edges
     needs: []
 
-    # Required: build steps (run in sequence)
+    # Required: ordered shell steps
     steps:
-      - name: test          # step name (for logs)
-        run: "sh ./test.sh" # shell command
-
+      - name: test
+        run: "sh ./test.sh"
       - name: package
         run: "tar czf out.tar.gz src/"
 
-    # Optional: artifacts to publish after job succeeds
-    artifacts:
-      - name: lib-http      # artifact name in registry
-        version: 1.0.0      # semver version
-        path: ./out.tar.gz  # path relative to workspace
+# Optional: top-level artifacts published after the pipeline succeeds
+artifacts:
+  - name: lib-http
+    version: 1.0.0
+    path: ./out.tar.gz
 ```
 
-**Validation rules:**
-- Unknown fields → error with line number
-- Missing required fields → error pointing at field
-- Invalid semver version → error
-- Cycle in job needs → error naming the cycle
-- Version conflict in deps → error showing both paths
+Validation behavior:
 
----
+- unknown fields fail validation
+- missing required fields fail validation
+- YAML parse/shape errors are reported with source location
+- duplicate artifact coordinates fail validation
+- job cycles fail before any execution starts
+
+Runtime behavior:
+
+- all jobs in the same pipeline share one workspace mounted at `/workspace`
+- resolved dependencies are materialized before any job runs at `/workspace/deps/<name>/`
+- `FORGE_TOKEN` and `FORGE_URL` are injected into each job container
+- top-level declared artifacts are published automatically after a successful run
 
 ## Architecture
 
-```
+```text
 Internet
-    │
-    ▼
- nginx :80
-    │
-    ├──► engine :8000   (CI runner, log streaming)
-    │
-    └──► registry :8001 (artifact storage, resolver)
+   |
+   v
+nginx :80
+   |
+   +--> engine   :8000
+   |
+   +--> registry :8001
 
-engine spawns job containers via Docker socket
-job containers → forge-internal network → registry only
+engine -> docker socket -> job containers
+job containers -> per-run internal network -> registry
 ```
-
----
 
 ## DAG Scheduler
 
-Jobs declare `needs: [other-job]` to express dependencies.
-The scheduler:
+Jobs use `needs: [...]` to declare dependencies. The scheduler:
 
-1. **Builds a directed graph** from needs declarations
-2. **Detects cycles** using DFS with a recursion stack before any job runs
-3. **Topologically sorts** using Kahn's algorithm
-4. **Executes independent jobs in parallel** up to `max_concurrency`
-5. **Marks dependents as skipped** (not failed) when a job fails
+1. Builds a directed graph from job dependencies.
+2. Detects cycles before any execution starts.
+3. Produces deterministic topological batches with lexical ordering.
+4. Runs independent jobs in parallel up to `engine.max_concurrency`.
+5. Marks downstream jobs as `skipped` if an upstream dependency fails.
 
-Example:
-```
-lint ──┐
-       ├──► build ──► publish
-test ──┘
-```
-`lint` and `test` run in parallel.
-`build` waits for both.
-If `test` fails → `build` is skipped → `publish` is skipped.
+Implementation notes:
 
----
+- graph validation and cycle detection live in `engine/scheduler.py`
+- parallel execution uses the Python standard library, not a workflow engine
+- scheduler ordering is deterministic for the same pipeline definition
 
 ## Isolation Mechanism
 
 Each job runs in a Docker container with:
 
-| Constraint | How enforced |
+| Constraint | Current enforcement |
 |---|---|
-| Filesystem | `--read-only` + `--tmpfs /workspace` — host FS invisible |
-| Network | `--network forge-internal` — internal only, no internet |
-| CPU | `--cpu-quota` via cgroups |
-| Memory | `--memory` + `--memory-swap` via cgroups |
-| Processes | `--pids-limit 100` — cannot fork-bomb |
-| Privileges | `--no-new-privileges` — cannot escalate |
-
-OOM kill produces: `Job killed: memory limit exceeded (512Mi)`
-
----
+| Filesystem | read-only root filesystem plus bind-mounted shared `/workspace` |
+| Workspace sharing | per-run host-backed workspace bind-mounted at `/workspace` |
+| Temporary files | tmpfs at `/tmp` |
+| Network | per-run internal Docker network with only the registry service attached |
+| CPU | `cpu_period` + `cpu_quota` |
+| Memory | `mem_limit` + `memswap_limit` |
+| Processes | `pids_limit=100` |
+| Privileges | `cap_drop=["ALL"]` + `no-new-privileges` |
 
 ## Storage Layer
 
-Content-addressable blob storage:
-- Blobs stored at `/artifacts/blobs/<sha256[:2]>/<sha256>`
-- Two files with identical content share one blob
-- `(name, version)` → `sha256` mapping stored in SQLite
-- Second upload to existing `(name, version)` → 409 (immutable)
+Registry storage is content-addressed:
 
-Race condition handling: SQLite `UNIQUE(name, version)` constraint is atomic.
-If two uploads race, the second gets a constraint violation → 409.
+- blobs are stored under `/data/artifacts/<sha256[:2]>/<sha256>`
+- metadata is stored in SQLite
+- `(name, version)` is immutable
+- duplicate publishes return `409`
+- server-side checksum mismatches return `400`
 
----
+Two pipelines racing to publish the same `(name, version)` are handled by the
+database uniqueness constraint on `(name, version)`. The first publish wins and
+the second publish receives a conflict error.
 
 ## Dependency Resolver
 
-Implements semver from scratch:
+The resolver is implemented in `registry/resolver.py` and supports:
 
-| Constraint | Meaning |
-|---|---|
-| `1.0.0` | Exact version |
-| `^1.0.0` | `>=1.0.0 <2.0.0` |
-| `~1.0.0` | `>=1.0.0 <1.1.0` |
-| `>=1.0.0 <2.0.0` | Range |
+- exact versions: `1.0.0`
+- caret ranges: `^1.0.0`
+- tilde ranges: `~1.0.0`
+- comparator ranges: `>=1.0.0 <2.0.0`
 
-Resolution is deterministic because:
-1. Graph traversal order is alphabetical by package name
-2. Version selection always picks highest satisfying version
-3. Same registry state + same constraints = identical lockfile
+Resolver behavior:
 
----
+- walks transitive dependency metadata from the registry
+- selects the highest published version satisfying all active constraints
+- detects version conflicts with path-aware error messages
+- detects dependency cycles with explicit cycle paths
+- emits deterministic lockfiles containing exact versions and SHA-256 hashes
+
+Why selection is deterministic:
+
+1. requested dependencies are normalized and sorted
+2. package resolution iterates names in sorted order
+3. candidate versions are sorted and the highest satisfying version is chosen
+4. lockfile JSON is emitted in stable key order
 
 ## Log Streaming
 
-- Each log line written to disk immediately with `f.flush()`
-- Log format: one JSON object per line (`jsonl`)
-- SSE endpoint reads line-by-line with file cursor
-- Client connecting mid-build receives backlog then new lines
-- 50MB logs stream without loading into memory
+Logs are persisted as NDJSON and streamed over SSE.
 
----
+Behavior:
 
-## API Reference
+- each log line is written to disk as a JSON object with timestamp, job, and line
+- clients connecting mid-run receive backlog first, then live updates
+- the log reader streams line-by-line instead of buffering the whole file
+- dependency preparation logs and job logs share the same run log
+- the engine appends a single run-level EOF marker when the run reaches a terminal state
+
+This keeps large logs streamable without loading them into memory.
+
+## HTTP API
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/runs` | Submit pipeline |
-| GET | `/runs/{id}` | Get run status |
-| GET | `/runs/{id}/lockfile` | Get lockfile |
-| GET | `/runs/{id}/logs?follow=true` | Stream logs (SSE) |
-| POST | `/artifacts/{name}/{version}` | Upload artifact |
-| GET | `/artifacts/{name}/{version}` | Download artifact |
-| GET | `/artifacts/{name}/{version}/meta` | Get metadata |
-| GET | `/artifacts/{name}` | List versions |
+| `POST` | `/runs` | submit pipeline |
+| `GET` | `/runs/{id}` | get run status |
+| `GET` | `/runs/{id}/lockfile` | get resolved lockfile |
+| `GET` | `/runs/{id}/logs?follow=true` | stream logs over SSE |
+| `POST` | `/artifacts/{name}/{version}` | upload artifact |
+| `GET` | `/artifacts/{name}/{version}` | download artifact |
+| `GET` | `/artifacts/{name}/{version}/meta` | read artifact metadata |
+| `GET` | `/artifacts/{name}` | list versions |
 
-All write operations require `Authorization: Bearer <token>`
+All write operations require:
 
----
+```text
+Authorization: Bearer <token>
+```
+
+Run status values:
+
+- `queued`
+- `running`
+- `succeeded`
+- `failed`
+- `integrity_failure`
+- `conflict_failure`
+- `cycle_failure`
 
 ## CLI Reference
 
+User CLI:
+
 ```bash
-forge login <url>                              # save credentials
-forge run <pipeline.yaml>                      # run pipeline
-forge logs <run-id> [--follow]                 # view logs
-forge publish <path> --name <n> --version <v>  # publish artifact
-forge resolve <pipeline.yaml>                  # print lockfile
-forge ls <package>                             # list versions
+forge login <url>
+forge run <pipeline.yaml>
+forge logs <run-id> [--follow]
+forge publish <path> --name <n> --version <v>
+forge resolve <pipeline.yaml>
+forge ls <package>
 ```
 
----
+Host admin CLI:
+
+```bash
+forge-token create <name>
+forge-token list
+forge-token revoke <name>
+```
 
 ## Slack Alerts
 
-All alerts route to the configured Slack webhook.
+Configured through the `SLACK_WEBHOOK_URL` environment variable.
 
-Events:
-- Pipeline started / succeeded / failed
-- Integrity failure (with both SHA-256 hashes)
-- Resolution failure (with conflict details)
+Implemented alert types:
 
-Configure in `config.yaml`:
-```yaml
-slack:
-  webhook_url: "https://hooks.slack.com/services/..."
+- pipeline started
+- pipeline succeeded
+- pipeline failed
+- integrity failure
+- resolution failure
+
+*[Slack alerts screenshot here]*
+
+## Current Verification Snapshot
+
+Targeted test suites currently passing:
+
+```bash
+python -m pytest tests -q
 ```
 
-*[Screenshot of Slack alerts here]*
+Observed result during the latest update:
 
----
+- `58 passed`
 
-## Required Capabilities Test Results
-
-| # | Capability | Result |
-|---|---|---|
-| 1 | Build + publish lib-core@1.0.0 | ✅ |
-| 2 | Resolve ^1.0.0, publish lib-http@1.0.0 | ✅ |
-| 3 | Resolve both, publish service-api@0.1.0 | ✅ |
-| 4 | Wrong checksum → 400 | ✅ |
-| 5 | Duplicate upload → 409 | ✅ |
-| 6 | Version conflict → fail before build | ✅ |
-| 7 | Filesystem escape, OOM, network egress → all blocked | ✅ |
-| 8 | 50MB log stream → live, not buffered | ✅ |
