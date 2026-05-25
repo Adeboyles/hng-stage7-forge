@@ -267,7 +267,7 @@ forge-token revoke <name>
 
 ## Slack Alerts
 
-Configured through the `SLACK_WEBHOOK_URL` environment variable.
+Configured through the `webhook_url` field of `config.yaml`.
 
 Implemented alert types:
 

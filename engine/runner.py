@@ -132,6 +132,7 @@ class JobRunner:
 
     def _create_job_network(self, run_id: str):
         """Create an internal network for one job run and attach only the registry container."""
+        self._prune_stale_job_networks()
         network_name = f"{self.network_name}-{run_id[:12]}"
         log.info("creating docker network %s (internal)", network_name)
         network = self.client.networks.create(
@@ -199,10 +200,14 @@ class JobRunner:
         start = time.monotonic()
         container: Optional[Container] = None
         network = None
+        registry_container = None
+        registry_attached = False
         timed_out = False
 
         try:
             network = self._create_job_network(spec.run_id)
+            registry_container = self._registry_container()
+            registry_attached = True
             container = self.client.containers.run(
                 image=spec.image,
                 command=cmd,
@@ -295,13 +300,33 @@ class JobRunner:
             if container is not None:
                 try:
                     container.remove(force=True)
-                except APIError:
-                    pass
+                except APIError as exc:
+                    log.warning(
+                        "failed to remove job container for run %s step %s: %s",
+                        spec.run_id,
+                        spec.step_name,
+                        exc,
+                    )
+            if network is not None and registry_attached and registry_container is not None:
+                try:
+                    network.disconnect(registry_container, force=True)
+                except APIError as exc:
+                    log.warning(
+                        "failed to disconnect registry from job network %s for run %s: %s",
+                        network.name,
+                        spec.run_id,
+                        exc,
+                    )
             if network is not None:
                 try:
                     network.remove()
-                except APIError:
-                    pass
+                except APIError as exc:
+                    log.warning(
+                        "failed to remove job network %s for run %s: %s",
+                        network.name,
+                        spec.run_id,
+                        exc,
+                    )
             writer.close(write_eof=False)
 
     # -- helpers ----------------------------------------------------------
@@ -413,6 +438,28 @@ class JobRunner:
             )
         host, port_text = target.rsplit(":", 1)
         return host, int(port_text)
+
+    def _prune_stale_job_networks(self) -> None:
+        """Best-effort cleanup of leaked empty Forge job networks from prior runs."""
+        try:
+            networks = self.client.networks.list(names=[self.network_name])
+        except (APIError, AttributeError) as exc:
+            log.warning("failed to list stale job networks: %s", exc)
+            return
+
+        prefix = f"{self.network_name}-"
+        for network in networks:
+            name = getattr(network, "name", "")
+            if not name.startswith(prefix):
+                continue
+            containers = getattr(network, "attrs", {}).get("Containers") or {}
+            if containers:
+                continue
+            try:
+                network.remove()
+                log.info("removed stale job network %s", name)
+            except APIError as exc:
+                log.warning("failed to remove stale job network %s: %s", name, exc)
 
     def _cpu_quota(self, cpu_limit: float) -> int:
         """Convert a CPU count into a Docker CFS quota."""

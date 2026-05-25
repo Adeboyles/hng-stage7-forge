@@ -130,6 +130,7 @@ def test_job_runner_creates_ephemeral_internal_network_with_registry_only(monkey
 
     created = {}
     connected = []
+    disconnected = []
     removed_networks = []
     captured_run = {}
 
@@ -158,6 +159,9 @@ def test_job_runner_creates_ephemeral_internal_network_with_registry_only(monkey
         def connect(self, container, aliases=None):
             connected.append((container.id, aliases))
 
+        def disconnect(self, container, force=False):
+            disconnected.append((container.id, force))
+
         def remove(self):
             removed_networks.append(self.name)
 
@@ -165,6 +169,9 @@ def test_job_runner_creates_ephemeral_internal_network_with_registry_only(monkey
         def create(self, **kwargs):
             created.update(kwargs)
             return FakeNetwork(kwargs["name"])
+
+        def list(self, names=None):
+            return []
 
     class FakeContainers:
         def run(self, **kwargs):
@@ -192,6 +199,7 @@ def test_job_runner_creates_ephemeral_internal_network_with_registry_only(monkey
     assert created["driver"] == "bridge"
     assert created["name"].startswith("forge-test-net-")
     assert connected == [("registry-1", ["registry"])]
+    assert disconnected == [("registry-1", True)]
     assert captured_run["network"] == created["name"]
     assert removed_networks == [created["name"]]
     assert result.exit_code == 0
@@ -279,10 +287,16 @@ def test_job_runner_mounts_shared_workspace_for_run(monkeypatch, tmp_path):
                 def connect(self, container, aliases=None):
                     return None
 
+                def disconnect(self, container, force=False):
+                    return None
+
                 def remove(self):
                     return None
 
             return FakeNetwork()
+
+        def list(self, names=None):
+            return []
 
     class FakeContainers:
         def get(self, container_name):
@@ -335,6 +349,112 @@ def test_job_runner_mounts_shared_workspace_for_run(monkeypatch, tmp_path):
     assert captured["memswap_limit"] == 268_435_456
     assert expected_workspace.exists()
     assert result.exit_code == 0
+
+
+def test_job_runner_prunes_empty_stale_networks_before_creating_new_one(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        dedent(
+            """
+            engine:
+              log_base: /tmp/forge-logs
+            registry:
+              internal_host: registry
+              port: 9001
+            isolation:
+              network_name: forge-internal
+              allowed_egress:
+                - registry:9001
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FORGE_CONFIG", str(config_path))
+
+    docker_module = ModuleType("docker")
+    docker_errors = ModuleType("docker.errors")
+    docker_models = ModuleType("docker.models")
+    docker_models_containers = ModuleType("docker.models.containers")
+
+    class FakeNotFound(Exception):
+        pass
+
+    class FakeAPIError(Exception):
+        pass
+
+    docker_module.DockerClient = object
+    docker_errors.APIError = FakeAPIError
+    docker_errors.ContainerError = Exception
+    docker_errors.ImageNotFound = Exception
+    docker_errors.NotFound = FakeNotFound
+    docker_models_containers.Container = object
+
+    monkeypatch.setitem(sys.modules, "docker", docker_module)
+    monkeypatch.setitem(sys.modules, "docker.errors", docker_errors)
+    monkeypatch.setitem(sys.modules, "docker.models", docker_models)
+    monkeypatch.setitem(sys.modules, "docker.models.containers", docker_models_containers)
+
+    config_module = importlib.import_module("engine.config")
+    importlib.reload(config_module)
+    runner_module = importlib.import_module("engine.runner")
+    importlib.reload(runner_module)
+    config_module.reset_config_cache()
+
+    removed = []
+    created = {}
+
+    class StaleNetwork:
+        def __init__(self, name, containers):
+            self.name = name
+            self.attrs = {"Containers": containers}
+
+        def remove(self):
+            removed.append(self.name)
+
+    class NewNetwork:
+        def __init__(self, name):
+            self.name = name
+
+        def connect(self, container, aliases=None):
+            return None
+
+        def disconnect(self, container, force=False):
+            return None
+
+        def remove(self):
+            return None
+
+    class FakeNetworks:
+        def list(self, names=None):
+            assert names == ["forge-internal"]
+            return [
+                StaleNetwork("forge-internal-old-empty", {}),
+                StaleNetwork("forge-internal-old-busy", {"abc": {"Name": "registry"}}),
+                StaleNetwork("not-forge", {}),
+            ]
+
+        def create(self, **kwargs):
+            created.update(kwargs)
+            return NewNetwork(kwargs["name"])
+
+    class FakeRegistryContainer:
+        id = "registry-1"
+
+    class FakeContainers:
+        def list(self, filters=None):
+            return [FakeRegistryContainer()]
+
+    class FakeDockerClient:
+        def __init__(self):
+            self.networks = FakeNetworks()
+            self.containers = FakeContainers()
+
+    runner = runner_module.JobRunner(docker_client=FakeDockerClient())
+    network = runner._create_job_network("run-123456789abc")
+
+    assert removed == ["forge-internal-old-empty"]
+    assert created["name"].startswith("forge-internal-")
+    assert network.name == created["name"]
 
 
 def test_job_runner_uses_host_mount_source_for_workspace(monkeypatch, tmp_path):
@@ -421,10 +541,16 @@ def test_job_runner_uses_host_mount_source_for_workspace(monkeypatch, tmp_path):
                 def connect(self, container, aliases=None):
                     return None
 
+                def disconnect(self, container, force=False):
+                    return None
+
                 def remove(self):
                     return None
 
             return FakeNetwork()
+
+        def list(self, names=None):
+            return []
 
     class FakeContainers:
         def get(self, container_name):

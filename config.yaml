@@ -6,16 +6,15 @@ engine:
   workspace_base: /data/workspaces
   log_base: /data/logs
 
+slack:
+  webhook_url: ""
+
 registry:
   host: "0.0.0.0"
   internal_host: "registry"
   port: 8001
   storage_path: /data/artifacts
   db_path: /data/registry.db
-
-slack:
-  webhook_url: ${SLACK_WEBHOOK_URL}
-  enabled: true
 
 auth:
   hash_algorithm: bcrypt
