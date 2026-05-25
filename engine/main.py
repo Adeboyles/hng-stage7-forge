@@ -21,7 +21,9 @@ try:
     from .parser import parse_pipeline_text as parse_pipeline, PipelineValidationError
     from .scheduler import DAGScheduler, SchedulerError
     from . import slack
-except ImportError:  # pragma: no cover - supports running as `uvicorn main:app` from /app
+except (
+    ImportError
+):  # pragma: no cover - supports running as `uvicorn main:app` from /app
     from config import engine_settings, registry_internal_base_url
     from logs import append_eof, append_log_line, tail_log
     from parser import parse_pipeline_text as parse_pipeline, PipelineValidationError
@@ -63,7 +65,9 @@ async def init_db():
         """)
         await db.commit()
 
+
 # ── Auth ──────────────────────────────────────────────
+
 
 async def verify_token(authorization: Optional[str]) -> str:
     if not authorization or not authorization.startswith("Bearer "):
@@ -72,11 +76,12 @@ async def verify_token(authorization: Optional[str]) -> str:
     token = authorization.replace("Bearer ", "").strip()
 
     import httpx
+
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"{registry_internal_base_url()}/auth/verify",
             headers={"Authorization": f"Bearer {token}"},
-            timeout=5.0
+            timeout=5.0,
         )
 
         if resp.status_code != 200:
@@ -85,12 +90,20 @@ async def verify_token(authorization: Optional[str]) -> str:
     return token
 
 
+@app.get("/")
+async def root() -> dict[str, str]:
+    return {
+        "name": "Forge Artifact Registry",
+        "version": "0.1.0",
+    }
+
+
 # ── CREATE RUN ───────────────────────────────────────
+
 
 @app.post("/runs")
 async def create_run(
-    pipeline: UploadFile = File(...),
-    authorization: Optional[str] = Header(None)
+    pipeline: UploadFile = File(...), authorization: Optional[str] = Header(None)
 ):
     token = await verify_token(authorization)
 
@@ -114,8 +127,8 @@ async def create_run(
                 pipeline_def.name,
                 "queued",
                 json.dumps({}),
-                datetime.now(timezone.utc).isoformat()
-            )
+                datetime.now(timezone.utc).isoformat(),
+            ),
         )
         await db.commit()
 
@@ -163,6 +176,7 @@ async def stream_run_logs(
 
 # ── PIPELINE EXECUTION ───────────────────────────────
 
+
 async def execute_pipeline(run_id: str, pipeline_def, token: str):
     pipeline_name = pipeline_def.name
     started_at = datetime.now(timezone.utc).isoformat()
@@ -188,8 +202,7 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE runs SET lockfile=? WHERE id=?",
-            (json.dumps(lockfile), run_id)
+            "UPDATE runs SET lockfile=? WHERE id=?", (json.dumps(lockfile), run_id)
         )
         await db.commit()
 
@@ -201,9 +214,13 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
             run_id,
             f"integrity failure for {e.artifact}: expected sha256 {e.expected_sha}, actual sha256 {e.actual_sha}",
         )
-        await update_run_status(run_id, "integrity_failure", finished_at=finished_at, jobs={})
+        await update_run_status(
+            run_id, "integrity_failure", finished_at=finished_at, jobs={}
+        )
         _finish_run_log(run_id)
-        await slack.notify_integrity_failure(e.artifact, e.expected_sha, e.actual_sha, run_id)
+        await slack.notify_integrity_failure(
+            e.artifact, e.expected_sha, e.actual_sha, run_id
+        )
         return
 
     # -----------------------------
@@ -293,8 +310,7 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
             final_status = "failed"
             finished_at = datetime.now(timezone.utc).isoformat()
             duration = (
-                datetime.fromisoformat(finished_at) -
-                datetime.fromisoformat(started_at)
+                datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)
             ).seconds
             await update_run_status(
                 run_id,
@@ -310,8 +326,7 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
             return
         finished_at = datetime.now(timezone.utc).isoformat()
         duration = (
-            datetime.fromisoformat(finished_at) -
-            datetime.fromisoformat(started_at)
+            datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)
         ).seconds
         await update_run_status(
             run_id,
@@ -324,8 +339,7 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
     else:
         finished_at = datetime.now(timezone.utc).isoformat()
         duration = (
-            datetime.fromisoformat(finished_at) -
-            datetime.fromisoformat(started_at)
+            datetime.fromisoformat(finished_at) - datetime.fromisoformat(started_at)
         ).seconds
         await update_run_status(
             run_id,
@@ -341,7 +355,10 @@ async def execute_pipeline(run_id: str, pipeline_def, token: str):
 
 # ── DB HELPERS ───────────────────────────────────────
 
-async def update_run_status(run_id, status, started_at=None, finished_at=None, jobs=None):
+
+async def update_run_status(
+    run_id, status, started_at=None, finished_at=None, jobs=None
+):
     async with aiosqlite.connect(DB_PATH) as db:
         updates = ["status=?"]
         values = [status]
@@ -360,10 +377,7 @@ async def update_run_status(run_id, status, started_at=None, finished_at=None, j
 
         values.append(run_id)
 
-        await db.execute(
-            f"UPDATE runs SET {', '.join(updates)} WHERE id=?",
-            values
-        )
+        await db.execute(f"UPDATE runs SET {', '.join(updates)} WHERE id=?", values)
         await db.commit()
 
 
@@ -425,7 +439,9 @@ async def materialize_dependencies(run_id: str, lockfile: dict, token: str) -> N
 async def download_artifact(name: str, version: str, token: str) -> bytes:
     """Fetch one resolved artifact blob from the registry."""
     async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{registry_internal_base_url()}/artifacts/{name}/{version}")
+        resp = await client.get(
+            f"{registry_internal_base_url()}/artifacts/{name}/{version}"
+        )
         resp.raise_for_status()
         return resp.content
 
@@ -433,8 +449,7 @@ async def download_artifact(name: str, version: str, token: str) -> bytes:
 async def publish_pipeline_artifacts(run_id: str, pipeline_def, token: str) -> None:
     """Publish all declared top-level artifacts from the run workspace."""
     deps_payload = [
-        {"name": dep.name, "version": dep.version}
-        for dep in pipeline_def.dependencies
+        {"name": dep.name, "version": dep.version} for dep in pipeline_def.dependencies
     ]
     workspace = _workspace_path(run_id)
     for artifact in pipeline_def.artifacts:
@@ -523,6 +538,7 @@ def _finish_run_log(run_id: str) -> None:
 
 # ── DEPENDENCY RESOLUTION ───────────────────────────
 
+
 async def resolve_dependencies(deps, token):
     import httpx
 
@@ -530,7 +546,7 @@ async def resolve_dependencies(deps, token):
         resp = await client.post(
             f"{registry_internal_base_url()}/resolve",
             json={"dependencies": [d.__dict__ for d in deps]},
-            headers={"Authorization": f"Bearer {token}"}
+            headers={"Authorization": f"Bearer {token}"},
         )
 
         if resp.status_code != 200:
@@ -543,6 +559,8 @@ def _load_runner_types():
     """Import runner types lazily so engine.main can load without Docker SDK."""
     try:
         from .runner import JobRunner, JobSpec
-    except ImportError:  # pragma: no cover - supports running as `uvicorn main:app` from /app
+    except (
+        ImportError
+    ):  # pragma: no cover - supports running as `uvicorn main:app` from /app
         from runner import JobRunner, JobSpec
     return JobRunner, JobSpec
