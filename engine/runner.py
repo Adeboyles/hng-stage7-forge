@@ -4,9 +4,10 @@ engine/runner.py
 Executes build jobs inside hardened Docker containers.
 
 Isolation guarantees enforced per job:
-  - No host network. Container joins `forge-internal` (internal: true).
-    Only the registry service is reachable.
-  - Read-only root filesystem. Writable space is tmpfs on /workspace and /tmp.
+  - No host network. Each job gets its own internal Docker network.
+    Only the registry service is attached to that network.
+  - Read-only root filesystem. Writable space is the shared /workspace bind mount
+    for the current run plus tmpfs on /tmp.
   - 1.0 CPU, 512 MiB RAM, no swap, max 100 PIDs.
   - --no-new-privileges and security-opt=no-new-privileges (defense in depth).
   - --rm so the container disappears after exit.
@@ -32,10 +33,10 @@ from docker.errors import APIError, ContainerError, ImageNotFound, NotFound
 from docker.models.containers import Container
 
 try:
-    from .config import engine_settings, isolation_settings, registry_internal_base_url
+    from .config import engine_settings, isolation_settings
     from .logs import LogWriter
 except ImportError:  # pragma: no cover - supports running as `python runner.py` from /app
-    from config import engine_settings, isolation_settings, registry_internal_base_url
+    from config import engine_settings, isolation_settings
     from logs import LogWriter
 
 log = logging.getLogger(__name__)
@@ -72,6 +73,8 @@ class JobSpec:
     script: str                  # the shell snippet to execute
     image: str = DEFAULT_IMAGE
     timeout_s: int = DEFAULT_TIMEOUT_S
+    cpu_limit: Optional[float] = None
+    memory_limit: Optional[str] = None
     extra_env: dict = field(default_factory=dict)
 
 
@@ -110,30 +113,22 @@ class JobRunner:
         self.log_dir = log_dir or engine_config.get("log_base", "/var/forge/logs")
         self.workspace_base = engine_config.get("workspace_base", "/data/workspaces")
         self.network_name = isolation_config.get("network_name", "forge-internal")
-        self.registry_url = registry_internal_base_url()
-        default_cpu = float(isolation_config.get("default_cpu", 1.0))
-        self.cpu_quota = max(1, int(default_cpu * CPU_PERIOD))
-        self.mem_limit = str(isolation_config.get("default_memory", "512m"))
-        self.memswap_limit = self.mem_limit
+        self.registry_host, self.registry_port = self._registry_target(isolation_config)
+        self.registry_url = f"http://{self.registry_host}:{self.registry_port}"
+        self.default_cpu = float(isolation_config.get("default_cpu", 1.0))
+        self.default_memory = str(isolation_config.get("default_memory", "512m"))
         # token_provider lets tests inject deterministic tokens. In prod the
         # scheduler mints a short-lived token bound to (run_id, step_name).
         self._token_provider = token_provider or (lambda _run_id: uuid.uuid4().hex)
 
-        self._ensure_network()
-
     # -- network ----------------------------------------------------------
 
-    def _ensure_network(self) -> None:
-        """Create forge-internal if it does not already exist."""
-        try:
-            self.client.networks.get(self.network_name)
-            return
-        except NotFound:
-            pass
-
-        log.info("creating docker network %s (internal)", self.network_name)
-        self.client.networks.create(
-            name=self.network_name,
+    def _create_job_network(self, run_id: str):
+        """Create an internal network for one job run and attach only the registry container."""
+        network_name = f"{self.network_name}-{run_id[:12]}"
+        log.info("creating docker network %s (internal)", network_name)
+        network = self.client.networks.create(
+            name=network_name,
             driver="bridge",
             internal=True,        # <- no external internet
             check_duplicate=True,
@@ -146,6 +141,9 @@ class JobRunner:
                 "com.docker.network.bridge.enable_ip_masquerade": "false",
             },
         )
+        registry_container = self._registry_container()
+        network.connect(registry_container, aliases=[self.registry_host])
+        return network
 
     # -- env --------------------------------------------------------------
 
@@ -174,10 +172,15 @@ class JobRunner:
         log_path = os.path.join(self.log_dir, f"{spec.run_id}.log")
         workspace_path = self._workspace_path(spec.run_id)
         writer = LogWriter(log_path, job=spec.step_name)
+        cpu_limit = spec.cpu_limit if spec.cpu_limit is not None else self.default_cpu
+        cpu_quota = self._cpu_quota(cpu_limit)
+        mem_limit = self._docker_memory_limit(
+            spec.memory_limit if spec.memory_limit is not None else self.default_memory
+        )
 
         writer.write(f"--- starting step {spec.step_name} ---")
         writer.write(
-            f"image={spec.image} cpu={self.cpu_quota / CPU_PERIOD:.1f} mem={self.mem_limit} timeout={spec.timeout_s}s"
+            f"image={spec.image} cpu={cpu_limit:.1f} mem={mem_limit} timeout={spec.timeout_s}s"
         )
 
         # We invoke sh -c <script>. The script is passed as a single argv
@@ -187,15 +190,17 @@ class JobRunner:
 
         start = time.monotonic()
         container: Optional[Container] = None
+        network = None
         timed_out = False
 
         try:
+            network = self._create_job_network(spec.run_id)
             container = self.client.containers.run(
                 image=spec.image,
                 command=cmd,
                 detach=True,
                 remove=False,                    # we remove manually after reading state
-                network=self.network_name,
+                network=network.name,
                 environment=self._build_env(spec),
 
                 # --- isolation ---
@@ -213,9 +218,9 @@ class JobRunner:
 
                 # --- resources ---
                 cpu_period=CPU_PERIOD,
-                cpu_quota=self.cpu_quota,
-                mem_limit=self.mem_limit,
-                memswap_limit=self.memswap_limit,
+                cpu_quota=cpu_quota,
+                mem_limit=mem_limit,
+                memswap_limit=mem_limit,
                 pids_limit=PID_LIMIT,
                 oom_kill_disable=False,          # we WANT the kernel to OOM-kill
 
@@ -246,7 +251,7 @@ class JobRunner:
             oom_killed = self._was_oom_killed(container, exit_code)
 
             if oom_killed:
-                writer.write(f"Job killed: memory limit exceeded ({self.mem_limit})")
+                writer.write(f"Job killed: memory limit exceeded ({mem_limit})")
             elif not timed_out:
                 writer.write(f"--- step {spec.step_name} exited with code {exit_code} ---")
 
@@ -274,6 +279,11 @@ class JobRunner:
             if container is not None:
                 try:
                     container.remove(force=True)
+                except APIError:
+                    pass
+            if network is not None:
+                try:
+                    network.remove()
                 except APIError:
                     pass
             writer.close(write_eof=False)
@@ -312,6 +322,46 @@ class JobRunner:
         path = os.path.abspath(os.path.join(self.workspace_base, run_id))
         os.makedirs(path, exist_ok=True)
         return path
+
+    def _registry_container(self):
+        """Find the registry service container managed by Docker Compose."""
+        containers = self.client.containers.list(
+            filters={"label": "com.docker.compose.service=registry"}
+        )
+        if len(containers) != 1:
+            raise APIError("expected exactly one registry service container")
+        return containers[0]
+
+    def _registry_target(self, isolation_config: dict) -> tuple[str, int]:
+        """Return the configured registry hostname and port allowed for egress."""
+        allowed = isolation_config.get("allowed_egress") or []
+        if len(allowed) != 1:
+            raise ValueError("isolation.allowed_egress must contain exactly one registry endpoint")
+        target = str(allowed[0])
+        if ":" not in target:
+            raise ValueError("isolation.allowed_egress entries must be in host:port form")
+        host, port_text = target.rsplit(":", 1)
+        return host, int(port_text)
+
+    def _cpu_quota(self, cpu_limit: float) -> int:
+        """Convert a CPU count into a Docker CFS quota."""
+        return max(1, int(cpu_limit * CPU_PERIOD))
+
+    def _docker_memory_limit(self, value: str) -> str | int:
+        """Normalize memory strings so YAML values like `512Mi` become Docker-safe byte counts."""
+        text = str(value).strip()
+        units = {
+            "ki": 1024,
+            "mi": 1024 ** 2,
+            "gi": 1024 ** 3,
+            "ti": 1024 ** 4,
+        }
+        lowered = text.lower()
+        for suffix, multiplier in units.items():
+            if lowered.endswith(suffix):
+                amount = float(text[:-len(suffix)])
+                return int(amount * multiplier)
+        return text
 
     def _was_oom_killed(self, container: Container, exit_code: int) -> bool:
         """
