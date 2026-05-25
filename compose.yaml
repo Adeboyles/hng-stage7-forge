@@ -30,7 +30,7 @@ services:
     volumes:
       - ./data/artifacts:/data/artifacts
       - ./data:/data
-      - ./config.yaml:/app/config.yaml:ro
+      - ./config.yaml:/app/config.yaml
     environment:
       - FORGE_CONFIG=/app/config.yaml
     networks:

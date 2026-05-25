@@ -1,15 +1,9 @@
 import httpx
-import yaml
-from pathlib import Path
+import os
 
 
 def load_webhook_url() -> str:
-    config_path = Path("config.yaml")
-    if not config_path.exists():
-        return ""
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    return config.get("slack", {}).get("webhook_url", "")
+    return os.getenv("SLACK_WEBHOOK_URL", "")
 
 
 async def send_slack(payload: dict):

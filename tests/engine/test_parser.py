@@ -141,3 +141,59 @@ def test_parse_pipeline_text_rejects_duplicate_artifact_coordinates():
         )
 
     assert "duplicate artifact" in str(exc_info.value).lower()
+
+
+def test_parse_pipeline_text_rejects_unknown_nested_job_field():
+    with pytest.raises(PipelineValidationError) as exc_info:
+        parse_pipeline_text(
+            dedent(
+                """
+                name: build-lib-http
+                version: 1.0.0
+                jobs:
+                  build:
+                    runtime: alpine:3.18
+                    resources:
+                      cpu: 1.0
+                      memory: 512Mi
+                    shell: sh
+                    steps:
+                      - name: package
+                        run: tar czf out.tar.gz src/
+                artifacts: []
+                """
+            )
+        )
+
+    error = exc_info.value
+    assert "unknown field 'shell'" in str(error)
+    assert error.path == "jobs.build"
+    assert error.line == 10
+
+
+def test_parse_pipeline_text_rejects_unknown_nested_step_field():
+    with pytest.raises(PipelineValidationError) as exc_info:
+        parse_pipeline_text(
+            dedent(
+                """
+                name: build-lib-http
+                version: 1.0.0
+                jobs:
+                  build:
+                    runtime: alpine:3.18
+                    resources:
+                      cpu: 1.0
+                      memory: 512Mi
+                    steps:
+                      - name: package
+                        run: tar czf out.tar.gz src/
+                        shell: sh
+                artifacts: []
+                """
+            )
+        )
+
+    error = exc_info.value
+    assert "unknown field 'shell'" in str(error)
+    assert error.path == "jobs.build.steps[0]"
+    assert error.line == 13

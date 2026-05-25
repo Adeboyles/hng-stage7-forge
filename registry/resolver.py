@@ -3,7 +3,10 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from metadata import ArtifactMetadataStore, ArtifactNotFoundError
+try:
+    from .metadata import ArtifactMetadataStore, ArtifactNotFoundError
+except ImportError:  # pragma: no cover - supports running from /app without package imports
+    from metadata import ArtifactMetadataStore, ArtifactNotFoundError
 
 
 VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
