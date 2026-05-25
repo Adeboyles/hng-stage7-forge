@@ -39,6 +39,16 @@ async def lifespan(_app: FastAPI):
 ENGINE_CONFIG = engine_settings()
 app = FastAPI(title="Forge CI Engine", lifespan=lifespan)
 
+# ── NEW ROOT ROUTE ───────────────────────────────────
+
+@app.get("/")
+async def root():
+    return {
+        "status": "healthy",
+        "service": "Forge CI Engine",
+        "message": "Welcome! Use /docs to view available API endpoints."
+    }
+
 # ── DB ───────────────────────────────────────────────
 
 DB_PATH = Path("/tmp/engine.db")
