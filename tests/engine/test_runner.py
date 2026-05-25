@@ -4,6 +4,7 @@ import importlib
 import os
 import sys
 from types import ModuleType
+from types import SimpleNamespace
 from textwrap import dedent
 
 
@@ -284,6 +285,19 @@ def test_job_runner_mounts_shared_workspace_for_run(monkeypatch, tmp_path):
             return FakeNetwork()
 
     class FakeContainers:
+        def get(self, container_name):
+            assert container_name
+            return SimpleNamespace(
+                attrs={
+                    "Mounts": [
+                        {
+                            "Destination": str(workspace_base),
+                            "Source": os.path.abspath(workspace_base),
+                        }
+                    ]
+                }
+            )
+
         def run(self, **kwargs):
             captured.update(kwargs)
             return FakeContainer()
@@ -320,4 +334,133 @@ def test_job_runner_mounts_shared_workspace_for_run(monkeypatch, tmp_path):
     assert captured["mem_limit"] == 268_435_456
     assert captured["memswap_limit"] == 268_435_456
     assert expected_workspace.exists()
+    assert result.exit_code == 0
+
+
+def test_job_runner_uses_host_mount_source_for_workspace(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    workspace_base = tmp_path / "workspaces"
+    host_workspace_base = tmp_path / "host-workspaces"
+    config_path.write_text(
+        dedent(
+            f"""
+            engine:
+              log_base: {tmp_path.as_posix()}/logs
+              workspace_base: {workspace_base.as_posix()}
+            registry:
+              internal_host: registry-internal
+              port: 9001
+            isolation:
+              network_name: forge-test-net
+              allowed_egress:
+                - registry-internal:9001
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FORGE_CONFIG", str(config_path))
+    monkeypatch.setenv("HOSTNAME", "forge-engine")
+
+    docker_module = ModuleType("docker")
+    docker_errors = ModuleType("docker.errors")
+    docker_models = ModuleType("docker.models")
+    docker_models_containers = ModuleType("docker.models.containers")
+
+    class FakeNotFound(Exception):
+        pass
+
+    class FakeAPIError(Exception):
+        pass
+
+    class FakeContainerError(Exception):
+        pass
+
+    docker_module.DockerClient = object
+    docker_errors.APIError = FakeAPIError
+    docker_errors.ContainerError = FakeContainerError
+    docker_errors.ImageNotFound = Exception
+    docker_errors.NotFound = FakeNotFound
+    docker_models_containers.Container = object
+
+    monkeypatch.setitem(sys.modules, "docker", docker_module)
+    monkeypatch.setitem(sys.modules, "docker.errors", docker_errors)
+    monkeypatch.setitem(sys.modules, "docker.models", docker_models)
+    monkeypatch.setitem(sys.modules, "docker.models.containers", docker_models_containers)
+
+    config_module = importlib.import_module("engine.config")
+    importlib.reload(config_module)
+    runner_module = importlib.import_module("engine.runner")
+    importlib.reload(runner_module)
+    config_module.reset_config_cache()
+
+    captured = {}
+
+    class FakeContainer:
+        attrs = {"State": {"OOMKilled": False}}
+
+        def logs(self, **kwargs):
+            return iter([b"hello from build\n"])
+
+        def wait(self, timeout=None):
+            return {"StatusCode": 0}
+
+        def reload(self):
+            return None
+
+        def remove(self, force=False):
+            return None
+
+    class FakeRegistryContainer:
+        id = "registry-1"
+
+    class FakeNetworks:
+        def create(self, **kwargs):
+            class FakeNetwork:
+                name = kwargs["name"]
+
+                def connect(self, container, aliases=None):
+                    return None
+
+                def remove(self):
+                    return None
+
+            return FakeNetwork()
+
+    class FakeContainers:
+        def get(self, container_name):
+            assert container_name == "forge-engine"
+            return SimpleNamespace(
+                attrs={
+                    "Mounts": [
+                        {
+                            "Destination": str(workspace_base),
+                            "Source": os.path.abspath(host_workspace_base),
+                        }
+                    ]
+                }
+            )
+
+        def run(self, **kwargs):
+            captured.update(kwargs)
+            return FakeContainer()
+
+        def list(self, filters=None):
+            return [FakeRegistryContainer()]
+
+    class FakeDockerClient:
+        def __init__(self):
+            self.networks = FakeNetworks()
+            self.containers = FakeContainers()
+
+    runner = runner_module.JobRunner(
+        docker_client=FakeDockerClient(),
+        token_provider=lambda _run_id: "issued-token",
+    )
+    result = runner.run(
+        runner_module.JobSpec(run_id="run-host-map", step_name="build", script="echo hi")
+    )
+
+    assert captured["volumes"] == {
+        os.path.abspath(host_workspace_base / "run-host-map"): {"bind": "/workspace", "mode": "rw"}
+    }
     assert result.exit_code == 0

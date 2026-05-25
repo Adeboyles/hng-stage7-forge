@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import shlex
 import time
 import uuid
@@ -122,6 +123,7 @@ class JobRunner:
         self.registry_url = f"http://{self.registry_host}:{self.registry_port}"
         self.default_cpu = float(isolation_config.get("default_cpu", 1.0))
         self.default_memory = str(isolation_config.get("default_memory", "512m"))
+        self._host_workspace_base: Optional[str] = None
         # token_provider lets tests inject deterministic tokens. In prod the
         # scheduler mints a short-lived token bound to (run_id, step_name).
         self._token_provider = token_provider or (lambda _run_id: uuid.uuid4().hex)
@@ -176,6 +178,7 @@ class JobRunner:
         """Run one job. Blocks until the container exits or is killed."""
         log_path = os.path.join(self.log_dir, f"{spec.run_id}.log")
         workspace_path = self._workspace_path(spec.run_id)
+        workspace_bind_source = self._host_workspace_path(spec.run_id)
         writer = LogWriter(log_path, job=spec.step_name)
         cpu_limit = spec.cpu_limit if spec.cpu_limit is not None else self.default_cpu
         cpu_quota = self._cpu_quota(cpu_limit)
@@ -213,7 +216,7 @@ class JobRunner:
                     "/tmp": "rw,size=64m,mode=1777",
                 },
                 volumes={
-                    workspace_path: {"bind": "/workspace", "mode": "rw"},
+                    workspace_bind_source: {"bind": "/workspace", "mode": "rw"},
                 },
                 working_dir="/workspace",
                 cap_drop=["ALL"],  # drop every Linux capability
@@ -333,10 +336,59 @@ class JobRunner:
             writer.write(buffer.decode("utf-8", errors="replace"))
 
     def _workspace_path(self, run_id: str) -> str:
-        """Return the host workspace directory for a pipeline run."""
-        path = os.path.abspath(os.path.join(self.workspace_base, run_id))
+        """Return the engine-visible workspace directory for a pipeline run."""
+        path = os.path.normpath(
+            os.path.abspath(os.path.join(self.workspace_base, run_id))
+        )
         os.makedirs(path, exist_ok=True)
         return path
+
+    def _host_workspace_path(self, run_id: str) -> str:
+        """
+        Return the Docker-daemon-visible workspace source path for a pipeline run.
+
+        The engine process runs inside a container and talks to the host Docker
+        daemon over `/var/run/docker.sock`. That means bind-mount source paths are
+        interpreted by the daemon host, not by the engine container. We inspect
+        the engine container's own bind mounts to translate `/data/workspaces`
+        into the corresponding host source path before launching sibling job
+        containers.
+        """
+        base = self._resolve_host_workspace_base()
+        return os.path.normpath(os.path.join(base, run_id))
+
+    def _resolve_host_workspace_base(self) -> str:
+        """Find the host bind source that backs the engine's workspace mount."""
+        if self._host_workspace_base is not None:
+            return self._host_workspace_base
+
+        fallback_base = os.path.normpath(self.workspace_base)
+        container_name = os.environ.get("HOSTNAME") or socket.gethostname()
+        try:
+            container = self.client.containers.get(container_name)
+        except (APIError, AttributeError, NotFound):
+            self._host_workspace_base = fallback_base
+            return self._host_workspace_base
+
+        for mount in getattr(container, "attrs", {}).get("Mounts", []):
+            destination = mount.get("Destination")
+            source = mount.get("Source")
+            if isinstance(source, str) and self._same_path(
+                destination, self.workspace_base
+            ):
+                self._host_workspace_base = os.path.normpath(source)
+                return self._host_workspace_base
+
+        self._host_workspace_base = fallback_base
+        return self._host_workspace_base
+
+    def _same_path(self, left: str | None, right: str | None) -> bool:
+        """Compare two paths using the current platform's normalization rules."""
+        if not left or not right:
+            return False
+        return os.path.normcase(os.path.normpath(left)) == os.path.normcase(
+            os.path.normpath(right)
+        )
 
     def _registry_container(self):
         """Find the registry service container managed by Docker Compose."""
