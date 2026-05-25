@@ -35,7 +35,9 @@ from docker.models.containers import Container
 try:
     from .config import engine_settings, isolation_settings
     from .logs import LogWriter
-except ImportError:  # pragma: no cover - supports running as `python runner.py` from /app
+except (
+    ImportError
+):  # pragma: no cover - supports running as `python runner.py` from /app
     from config import engine_settings, isolation_settings
     from logs import LogWriter
 
@@ -54,8 +56,8 @@ PID_LIMIT = 100
 DEFAULT_IMAGE = "alpine:3.18"
 
 # Exit codes.
-EXIT_OOM = 137               # 128 + SIGKILL (9), Docker reports this on OOM
-EXIT_TIMEOUT = 124            # convention used here; we set it ourselves
+EXIT_OOM = 137  # 128 + SIGKILL (9), Docker reports this on OOM
+EXIT_TIMEOUT = 124  # convention used here; we set it ourselves
 
 # Hard ceiling on how long a job can run before we kill it.
 DEFAULT_TIMEOUT_S = 30 * 60
@@ -65,12 +67,14 @@ DEFAULT_TIMEOUT_S = 30 * 60
 # Job model
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class JobSpec:
     """Everything needed to run one build step."""
+
     run_id: str
-    step_name: str               # e.g. "build", "test"
-    script: str                  # the shell snippet to execute
+    step_name: str  # e.g. "build", "test"
+    script: str  # the shell snippet to execute
     image: str = DEFAULT_IMAGE
     timeout_s: int = DEFAULT_TIMEOUT_S
     cpu_limit: Optional[float] = None
@@ -91,6 +95,7 @@ class JobResult:
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
+
 
 class JobRunner:
     """
@@ -130,7 +135,7 @@ class JobRunner:
         network = self.client.networks.create(
             name=network_name,
             driver="bridge",
-            internal=True,        # <- no external internet
+            internal=True,  # <- no external internet
             check_duplicate=True,
             attachable=True,
             options={
@@ -199,10 +204,9 @@ class JobRunner:
                 image=spec.image,
                 command=cmd,
                 detach=True,
-                remove=False,                    # we remove manually after reading state
+                remove=False,  # we remove manually after reading state
                 network=network.name,
                 environment=self._build_env(spec),
-
                 # --- isolation ---
                 read_only=True,
                 tmpfs={
@@ -212,18 +216,15 @@ class JobRunner:
                     workspace_path: {"bind": "/workspace", "mode": "rw"},
                 },
                 working_dir="/workspace",
-                user="nobody",                   # don't run as root in the container
-                cap_drop=["ALL"],                # drop every Linux capability
+                cap_drop=["ALL"],  # drop every Linux capability
                 security_opt=["no-new-privileges"],
-
                 # --- resources ---
                 cpu_period=CPU_PERIOD,
                 cpu_quota=cpu_quota,
                 mem_limit=mem_limit,
                 memswap_limit=mem_limit,
                 pids_limit=PID_LIMIT,
-                oom_kill_disable=False,          # we WANT the kernel to OOM-kill
-
+                oom_kill_disable=False,  # we WANT the kernel to OOM-kill
                 # --- misc ---
                 labels={
                     "forge.run_id": spec.run_id,
@@ -253,7 +254,9 @@ class JobRunner:
             if oom_killed:
                 writer.write(f"Job killed: memory limit exceeded ({mem_limit})")
             elif not timed_out:
-                writer.write(f"--- step {spec.step_name} exited with code {exit_code} ---")
+                writer.write(
+                    f"--- step {spec.step_name} exited with code {exit_code} ---"
+                )
 
             duration = time.monotonic() - start
             return JobResult(
@@ -267,14 +270,24 @@ class JobRunner:
 
         except ImageNotFound:
             writer.write(f"Job failed: image {spec.image!r} not found in registry")
-            return JobResult(spec.run_id, spec.step_name, exit_code=125,
-                             oom_killed=False, timed_out=False,
-                             duration_s=time.monotonic() - start)
+            return JobResult(
+                spec.run_id,
+                spec.step_name,
+                exit_code=125,
+                oom_killed=False,
+                timed_out=False,
+                duration_s=time.monotonic() - start,
+            )
         except (ContainerError, APIError) as e:
             writer.write(f"Job failed: docker error: {e}")
-            return JobResult(spec.run_id, spec.step_name, exit_code=125,
-                             oom_killed=False, timed_out=False,
-                             duration_s=time.monotonic() - start)
+            return JobResult(
+                spec.run_id,
+                spec.step_name,
+                exit_code=125,
+                oom_killed=False,
+                timed_out=False,
+                duration_s=time.monotonic() - start,
+            )
         finally:
             if container is not None:
                 try:
@@ -299,7 +312,9 @@ class JobRunner:
         LogWriter which timestamps it and flushes to disk immediately.
         """
         try:
-            log_iter = container.logs(stream=True, follow=True, stdout=True, stderr=True)
+            log_iter = container.logs(
+                stream=True, follow=True, stdout=True, stderr=True
+            )
         except APIError as e:
             writer.write(f"could not attach to container logs: {e}")
             return
@@ -336,10 +351,14 @@ class JobRunner:
         """Return the configured registry hostname and port allowed for egress."""
         allowed = isolation_config.get("allowed_egress") or []
         if len(allowed) != 1:
-            raise ValueError("isolation.allowed_egress must contain exactly one registry endpoint")
+            raise ValueError(
+                "isolation.allowed_egress must contain exactly one registry endpoint"
+            )
         target = str(allowed[0])
         if ":" not in target:
-            raise ValueError("isolation.allowed_egress entries must be in host:port form")
+            raise ValueError(
+                "isolation.allowed_egress entries must be in host:port form"
+            )
         host, port_text = target.rsplit(":", 1)
         return host, int(port_text)
 
@@ -352,14 +371,14 @@ class JobRunner:
         text = str(value).strip()
         units = {
             "ki": 1024,
-            "mi": 1024 ** 2,
-            "gi": 1024 ** 3,
-            "ti": 1024 ** 4,
+            "mi": 1024**2,
+            "gi": 1024**3,
+            "ti": 1024**4,
         }
         lowered = text.lower()
         for suffix, multiplier in units.items():
             if lowered.endswith(suffix):
-                amount = float(text[:-len(suffix)])
+                amount = float(text[: -len(suffix)])
                 return int(amount * multiplier)
         return text
 
@@ -386,12 +405,15 @@ class JobRunner:
 
 if __name__ == "__main__":
     import sys
+
     logging.basicConfig(level=logging.INFO)
     script = " ".join(shlex.quote(a) for a in sys.argv[1:]) or "echo hello from forge"
     runner = JobRunner(log_dir="/tmp")
-    res = runner.run(JobSpec(
-        run_id="local-" + uuid.uuid4().hex[:8],
-        step_name="build",
-        script=script,
-    ))
+    res = runner.run(
+        JobSpec(
+            run_id="local-" + uuid.uuid4().hex[:8],
+            step_name="build",
+            script=script,
+        )
+    )
     print(res)
